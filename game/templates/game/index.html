@@ -122,7 +122,7 @@
     }
     button.secondary:hover { background: var(--grid); }
 
-    .speed {
+    .speed, .mode {
       display: flex;
       align-items: center;
       gap: 8px;
@@ -130,6 +130,19 @@
       color: var(--muted);
     }
     input[type="range"] { accent-color: var(--accent); }
+
+    select {
+      background: var(--panel);
+      color: var(--accent);
+      border: 1px solid var(--grid);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 0.9rem;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    select:disabled { opacity: 0.5; cursor: not-allowed; }
+    option { color: #06281a; }
 
     .status {
       margin-top: 10px;
@@ -165,6 +178,13 @@
   </div>
 
   <div class="controls">
+    <div class="mode">
+      AI
+      <select id="strategySelect">
+        <option value="search">探索AI (BFS)</option>
+        <option value="rl">学習済みAI (PPO)</option>
+      </select>
+    </div>
     <button id="pauseBtn" class="secondary" disabled>一時停止</button>
     <button id="restartBtn" class="secondary">新規ゲーム</button>
     <div class="speed">
@@ -190,6 +210,7 @@
       const pauseBtn = document.getElementById('pauseBtn');
       const restartBtn = document.getElementById('restartBtn');
       const speedRange = document.getElementById('speedRange');
+      const strategySelect = document.getElementById('strategySelect');
       const statusEl = document.getElementById('status');
 
       let gameId = null;
@@ -227,6 +248,13 @@
         stopLoop();
         const data = await api('/api/new/', { grid: 20 });
         gameId = data.game_id;
+        // Disable the PPO option if the server has no trained model / deps.
+        const rlOption = strategySelect.querySelector('option[value="rl"]');
+        if (!data.rl_available) {
+          rlOption.disabled = true;
+          rlOption.textContent = '学習済みAI (PPO) — 利用不可';
+          if (strategySelect.value === 'rl') strategySelect.value = 'search';
+        }
         applyState(data.state);
         overlay.classList.add('hidden');
         running = true;
@@ -251,13 +279,18 @@
         if (!running || paused) return;
         let data;
         try {
-          data = await api('/api/step/', { game_id: gameId });
+          data = await api('/api/step/', {
+            game_id: gameId,
+            strategy: strategySelect.value,
+          });
         } catch (e) {
           statusEl.textContent = '通信エラー: ' + e.message;
           return;
         }
         applyState(data.state);
-        statusEl.innerHTML = 'AIの選択: <span class="dir">' + data.direction + '</span>';
+        const label = data.strategy === 'rl' ? '学習済みAI(PPO)' : '探索AI(BFS)';
+        statusEl.innerHTML =
+          label + ' の選択: <span class="dir">' + data.direction + '</span>';
 
         if (data.state.game_over) {
           return endGame();

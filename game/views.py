@@ -19,7 +19,7 @@ from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
-from . import ai, store
+from . import ai, rl_agent, store
 
 
 def index(request):
@@ -42,7 +42,17 @@ def new_game(request):
     grid = int(data.get("grid", 20))
     grid = max(8, min(grid, 50))  # keep the board sane
     game_id, state = store.create(grid=grid)
-    return JsonResponse({"game_id": game_id, "state": state.to_dict()})
+    rl_available = rl_agent.is_available()
+    if rl_available:
+        # Preload the policy in the background so the first RL move isn't slow.
+        rl_agent.warmup_async()
+    return JsonResponse(
+        {
+            "game_id": game_id,
+            "state": state.to_dict(),
+            "rl_available": rl_available,
+        }
+    )
 
 
 @csrf_exempt
@@ -54,12 +64,14 @@ def step(request):
     if state is None:
         return JsonResponse({"error": "unknown game_id"}, status=404)
 
-    direction = ai.choose_direction(state)
+    strategy = data.get("strategy", "search")
+    direction, used = ai.choose(state, strategy)
     event = state.step(direction)
     return JsonResponse(
         {
             "game_id": game_id,
             "direction": direction,
+            "strategy": used,
             "event": event,
             "state": state.to_dict(),
         }

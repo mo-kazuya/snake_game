@@ -102,6 +102,29 @@ def _opposite(direction, current):
     return (dx, dy) == (-cx, -cy)
 
 
+def choose(state: GameState, strategy: str = "search") -> tuple[str, str]:
+    """Pick a direction using the requested strategy.
+
+    ``strategy`` is either ``"search"`` (the BFS/flood-fill AI below) or
+    ``"rl"`` (the trained PPO policy in :mod:`game.rl_agent`). If ``"rl"`` is
+    requested but unavailable — or it errors at runtime — this transparently
+    falls back to the search AI.
+
+    Returns ``(direction, strategy_used)`` so the caller can tell whether a
+    fallback happened.
+    """
+    if strategy == "rl":
+        from . import rl_agent
+
+        if rl_agent.is_available():
+            try:
+                return rl_agent.choose_direction(state), "rl"
+            except Exception:
+                # Any inference failure should never break the game loop.
+                pass
+    return choose_direction(state), "search"
+
+
 def choose_direction(state: GameState) -> str:
     """Pick the next direction for the snake given the current game state."""
     grid = state.grid

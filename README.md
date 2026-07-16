@@ -20,12 +20,17 @@
 | ファイル | 役割 |
 |----------|------|
 | `game/engine.py` | ゲームエンジン（状態と移動ルール） |
-| `game/ai.py` | AI本体（経路探索と生存戦略） |
+| `game/ai.py` | 探索AI本体＋戦略ディスパッチャ |
+| `game/rl_agent.py` | 学習済みPPOモデルのアダプタ（gym_snakeで学習した重みを読み込む） |
 | `game/store.py` | 進行中ゲームのインメモリ保管 |
 | `game/views.py` | HTTP APIエンドポイント |
 | `game/templates/game/index.html` | フロントエンド（描画とAIループ） |
 
-## AIの戦略
+## 2種類のAI
+
+画面上部のセレクタで、ヘビを動かすAIを切り替えられます（ゲーム中でも切替可）。
+
+### 1. 探索AI (BFS) — `game/ai.py`
 
 `game/ai.py` は次の優先順で一手を決めます。
 
@@ -34,6 +39,23 @@
 3. **最終手段** — どれも危険なら合法手を1つ選び、ゲームオーバーの判定はエンジンに委ねる。
 
 この戦略により、20×20の盤面でヘビは長さ50〜150以上まで自滅せずに成長します。
+
+### 2. 学習済みAI (PPO) — `game/rl_agent.py`
+
+`gym_snake` 環境で **強化学習（PPO）させた重み** （`examples/ppo_snake_features.zip`）を
+そのまま読み込んで動かします。
+
+- Djangoのゲーム状態を、学習時と同一の11次元 `features` 観測に変換して推論します。
+- この観測は**盤面サイズに依存しない**ため、10×10で学習したモデルが20×20でもそのまま動きます。
+- **依存の無い環境でも安全**: `stable-baselines3`/`torch` が未インストール、またはモデルファイルが
+  無い場合は自動的に探索AIへフォールバックし、フロント側では PPO オプションが選択不可になります。
+- 初回推論の遅延を隠すため、ゲーム作成時にモデルをバックグラウンドで事前ロードします。
+
+学習済みAIを使うには追加依存が必要です（学習方法は [`gym_snake/README.md`](gym_snake/README.md) 参照）:
+
+```bash
+pip install -e ".[train]"   # stable-baselines3 + torch
+```
 
 ## セットアップと起動
 
@@ -52,8 +74,8 @@ python manage.py runserver
 | メソッド・パス | 説明 |
 |----------------|------|
 | `GET /` | ゲーム画面 |
-| `POST /api/new/` | 新規ゲームを作成し `game_id` と初期状態を返す |
-| `POST /api/step/` | AIが一手進め、更新後の状態を返す（body: `{"game_id": "..."}`） |
+| `POST /api/new/` | 新規ゲームを作成し `game_id`・初期状態・`rl_available`（PPO利用可否）を返す |
+| `POST /api/step/` | AIが一手進め、更新後の状態を返す（body: `{"game_id": "...", "strategy": "search"\|"rl"}`）。レスポンスの `strategy` は実際に使われたAI（フォールバック時は `"search"`） |
 | `GET /api/state/?game_id=...` | 現在の状態を取得（進めない） |
 
 ## テスト

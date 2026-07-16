@@ -6,7 +6,7 @@ import json
 
 from django.test import TestCase
 
-from . import ai
+from . import ai, rl_agent
 from .engine import GameState
 
 
@@ -93,6 +93,50 @@ class AITests(TestCase):
             s.step(ai.choose_direction(s))
         # The safe-seeking AI should reach a decent score before any death.
         self.assertGreaterEqual(s.score, 30)
+
+
+class RLAgentTests(TestCase):
+    def test_observation_shape_and_range(self):
+        s = GameState(grid=20)
+        obs = rl_agent.build_observation(s)
+        self.assertEqual(obs.shape, (11,))
+        self.assertTrue((obs >= 0).all() and (obs <= 1).all())
+
+    def test_observation_matches_gym_encoding(self):
+        """The Django->obs conversion must match gym_snake's feature encoding."""
+        try:
+            from gym_snake.envs import SnakeEnv
+        except Exception:
+            self.skipTest("gym_snake not importable")
+
+        env = SnakeEnv(grid_size=12, obs_type="features")
+        env.reset(seed=0)
+        # Mirror the gym env's internal state into a Django GameState.
+        s = GameState(grid=12)
+        s.snake = list(env.snake)
+        s.food = env.food
+        s.direction = rl_agent._DIR_NAMES[env.heading_idx]
+
+        import numpy as np
+
+        self.assertTrue(np.array_equal(rl_agent.build_observation(s), env._feature_obs()))
+
+    def test_choose_falls_back_to_search_when_rl_unavailable(self):
+        # An unknown strategy must never raise; it falls back to search.
+        s = GameState(grid=20)
+        direction, used = ai.choose(s, strategy="does-not-exist")
+        self.assertEqual(used, "search")
+        self.assertIn(direction, ("up", "down", "left", "right"))
+
+    def test_rl_returns_valid_direction_when_available(self):
+        if not rl_agent.is_available():
+            self.skipTest("trained model / stable-baselines3 not available")
+        s = GameState(grid=20)
+        direction, used = ai.choose(s, strategy="rl")
+        self.assertEqual(used, "rl")
+        self.assertIn(direction, ("up", "down", "left", "right"))
+        # The RL agent must never reverse into the neck.
+        self.assertNotEqual(direction, "left")  # snake starts heading right
 
 
 class ViewTests(TestCase):
