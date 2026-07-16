@@ -68,7 +68,16 @@ python examples/train_sb3.py --obs grid --timesteps 500000
 
 PPOで実際に学習させた結果（学習曲線・スコア推移・学習済みモデル）は
 [`examples/TRAINING_RESULTS.md`](../examples/TRAINING_RESULTS.md) にまとめています。
-2Mステップの学習で平均スコア約23点（ランダムは0点）に到達しました。
+
+- **`features` 観測 (MLP)**: 2Mステップで平均スコア約23点（ランダムは0点）。
+- **`grid` 観測 (CNN)**: 3Mステップで平均スコア約14.5点。小盤面向けのカスタムCNN
+  （[`gym_snake/policies.py`](policies.py) の `SmallGridCNN`）を使用。生ピクセルからの
+  学習はサンプル効率が劣るため、探索強化・学習率減衰でプラトーを突破しています。
+
+```bash
+# grid観測 + CNN で学習
+python examples/train_sb3.py --obs grid --grid 10 --timesteps 3000000
+```
 
 ## テスト
 

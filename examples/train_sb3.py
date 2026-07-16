@@ -53,20 +53,33 @@ def main() -> None:
     env = DummyVecEnv([make_env_fn(args.grid, args.obs) for _ in range(args.n_envs)])
 
     # These hyperparameters reproduce the runs in examples/TRAINING_RESULTS.md.
-    common = dict(
-        n_steps=512, batch_size=512,
-        gamma=0.99, gae_lambda=0.95, ent_coef=0.01, learning_rate=3e-4,
-    )
     if args.obs == "features":
-        model = PPO("MlpPolicy", env, verbose=1, **common)
+        # The compact feature MLP learns fast with a constant LR.
+        model = PPO(
+            "MlpPolicy", env, verbose=1,
+            n_steps=512, batch_size=512,
+            gamma=0.99, gae_lambda=0.95, ent_coef=0.01, learning_rate=3e-4,
+        )
     else:
         # SB3's default NatureCNN can't handle a 10x10 board; use a small,
         # stride-1 CNN that preserves the board resolution.
+        #
+        # Learning from raw pixels is far less sample-efficient than from the
+        # hand-crafted features. A constant-LR / low-entropy run plateaus around
+        # mean score ~2; more exploration (higher ent_coef), larger, less
+        # frequently-updated rollouts, and a decaying learning rate break past
+        # that plateau to mean score ~15 over 3M steps.
         from gym_snake.policies import cnn_policy_kwargs
+
+        def linear_decay(progress_remaining: float) -> float:
+            return 3e-4 * progress_remaining
 
         model = PPO(
             "CnnPolicy", env, verbose=1,
-            policy_kwargs=cnn_policy_kwargs(), **common,
+            n_steps=1024, batch_size=2048, n_epochs=5,
+            gamma=0.99, gae_lambda=0.95, ent_coef=0.02,
+            learning_rate=linear_decay,
+            policy_kwargs=cnn_policy_kwargs(),
         )
     model.learn(total_timesteps=args.timesteps)
     model.save(args.out)
