@@ -56,3 +56,79 @@ def cnn_policy_kwargs(features_dim: int = 256) -> dict:
         features_extractor_kwargs=dict(features_dim=features_dim),
         normalize_images=False,  # obs is already 0/1, not 0-255
     )
+
+
+class AnyGridCNN(BaseFeaturesExtractor):
+    """Board-size-independent CNN for the grid observation.
+
+    :class:`SmallGridCNN` flattens the ``64 x H x W`` feature map into a linear
+    layer, tying the weights to the one board size it was trained on. This
+    extractor removes that dependency:
+
+    * **CoordConv** — two normalized coordinate channels (x, y in ``[-1, 1]``)
+      are appended to the input so absolute positions survive pooling,
+    * stride-1 convolutions preserve the board resolution,
+    * **adaptive pooling** collapses the feature map to a fixed ``4 x 4``
+      (average and max, concatenated), so the linear head always sees the same
+      shape regardless of H and W.
+
+    One set of weights therefore runs on 10x10 and 20x20 boards alike. As with
+    :class:`SmallGridCNN`, create the policy with ``normalize_images=False``.
+    """
+
+    POOL = 4  # pooled spatial size, fixed for any board
+
+    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 256):
+        super().__init__(observation_space, features_dim)
+        n_input_channels = observation_space.shape[0] + 2  # + coord channels
+        self.cnn = nn.Sequential(
+            nn.Conv2d(n_input_channels, 32, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+        )
+        n_flatten = 64 * self.POOL * self.POOL * 2  # avg + max pooled maps
+        self.linear = nn.Sequential(nn.Linear(n_flatten, features_dim), nn.ReLU())
+
+    def forward(self, observations: torch.Tensor) -> torch.Tensor:
+        b, _, h, w = observations.shape
+        device = observations.device
+        ys = torch.linspace(-1.0, 1.0, h, device=device).view(1, 1, h, 1).expand(b, 1, h, w)
+        xs = torch.linspace(-1.0, 1.0, w, device=device).view(1, 1, 1, w).expand(b, 1, h, w)
+        z = self.cnn(torch.cat([observations, xs, ys], dim=1))
+        avg = nn.functional.adaptive_avg_pool2d(z, self.POOL)
+        mx = nn.functional.adaptive_max_pool2d(z, self.POOL)
+        return self.linear(torch.cat([avg, mx], dim=1).flatten(1))
+
+
+def any_grid_policy_kwargs(features_dim: int = 256) -> dict:
+    """policy_kwargs for a PPO ``CnnPolicy`` using :class:`AnyGridCNN`."""
+    return dict(
+        features_extractor_class=AnyGridCNN,
+        features_extractor_kwargs=dict(features_dim=features_dim),
+        normalize_images=False,
+    )
+
+
+def load_ppo_for_grid(path, grid_size: int, device: str = "cpu", env=None):
+    """Load a saved PPO model rebound to a ``grid_size`` x ``grid_size`` board.
+
+    An SB3 checkpoint stores the observation space it was trained with, and
+    ``model.predict`` rejects observations of any other shape. For a model whose
+    feature extractor is size-independent (:class:`AnyGridCNN`), the weights are
+    valid for every board size — only the stored space needs overriding, which
+    is exactly what ``custom_objects`` does.
+    """
+    import numpy as np
+    from gymnasium import spaces
+    from stable_baselines3 import PPO
+
+    custom_objects = {
+        "observation_space": spaces.Box(
+            low=0.0, high=1.0, shape=(3, grid_size, grid_size), dtype=np.float32
+        ),
+        "action_space": spaces.Discrete(3),
+    }
+    return PPO.load(path, env=env, device=device, custom_objects=custom_objects)
