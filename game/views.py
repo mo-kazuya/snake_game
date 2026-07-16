@@ -39,18 +39,24 @@ def _parse_body(request) -> dict:
 @require_POST
 def new_game(request):
     data = _parse_body(request)
-    grid = int(data.get("grid", 20))
+    strategy = data.get("strategy", "search")
+
+    # The board size is driven by the chosen AI: the CNN model only runs on the
+    # 10x10 board it was trained on; everything else uses the default 20x20.
+    grid = rl_agent.required_grid(strategy) or int(data.get("grid", 20))
     grid = max(8, min(grid, 50))  # keep the board sane
+
     game_id, state = store.create(grid=grid)
-    rl_available = rl_agent.is_available()
-    if rl_available:
-        # Preload the policy in the background so the first RL move isn't slow.
-        rl_agent.warmup_async()
+
+    # Preload the selected RL policy in the background so its first move is fast.
+    if strategy in ("rl", "rl_cnn"):
+        rl_agent.warmup_async(strategy)
+
     return JsonResponse(
         {
             "game_id": game_id,
             "state": state.to_dict(),
-            "rl_available": rl_available,
+            "strategies": rl_agent.strategies_meta(),
         }
     )
 

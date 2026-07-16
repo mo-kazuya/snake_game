@@ -1,22 +1,24 @@
-"""Adapter that drives the Django Snake with the trained PPO agent.
+"""Adapter that drives the Django Snake with the trained PPO agents.
 
-The reinforcement-learning model was trained in the ``gym_snake`` environment
-(see ``examples/TRAINING_RESULTS.md``) with:
+Two reinforcement-learning models were trained in the ``gym_snake`` environment
+(see ``examples/TRAINING_RESULTS.md``), both using **relative actions**
+``0=straight, 1=turn-right, 2=turn-left``:
 
-* the **11-dim ``features`` observation** (danger sensors + heading one-hot +
-  food direction), and
-* **relative actions** ``0=straight, 1=turn-right, 2=turn-left``.
+* ``"rl"``      — an MLP on the **11-dim ``features`` observation**. The feature
+                  encoding is *independent of the board size*, so it runs on any
+                  Django board (default 20x20).
+* ``"rl_cnn"``  — a CNN on the **``(3, H, W)`` ``grid`` observation**. The CNN's
+                  flatten->linear head is fixed to the ``10x10`` board it trained
+                  on, so this model **only runs on a 10x10 board**.
 
-This module converts a Django :class:`~game.engine.GameState` into that exact
+This module converts a Django :class:`~game.engine.GameState` into the matching
 observation, asks the policy for an action, and converts the relative action
 back into an absolute direction the engine understands.
 
-Because the feature observation is **independent of the board size**, the model
-trained on a 10x10 board transfers directly to the Django default 20x20 board.
-
-Everything here degrades gracefully: if Stable-Baselines3 / PyTorch aren't
-installed, or the model file is missing, :func:`is_available` returns ``False``
-and callers fall back to the search-based AI in :mod:`game.ai`.
+Everything degrades gracefully: if Stable-Baselines3 / PyTorch (or, for the CNN,
+the ``gym_snake`` package that defines its feature extractor) aren't installed,
+or a model file is missing, :func:`is_available` returns ``False`` for that
+strategy and callers fall back to the search-based AI in :mod:`game.ai`.
 """
 
 from __future__ import annotations
@@ -33,60 +35,120 @@ from .engine import DIRECTIONS, GameState
 _HEADINGS = [(0, -1), (1, 0), (0, 1), (-1, 0)]
 _DIR_NAMES = ["up", "right", "down", "left"]
 
-MODEL_PATH = Path(settings.BASE_DIR) / "examples" / "ppo_snake_features.zip"
+_EXAMPLES = Path(settings.BASE_DIR) / "examples"
+
+# Registry of trained models. ``grid`` is the board size the model requires;
+# ``None`` means the observation is size-independent (runs on any board).
+_MODELS = {
+    "rl": {
+        "file": _EXAMPLES / "ppo_snake_features.zip",
+        "obs": "features",
+        "grid": None,
+        "label": "学習済みAI (features/MLP)",
+        "needs_gym_snake": False,
+    },
+    "rl_cnn": {
+        "file": _EXAMPLES / "ppo_snake_grid.zip",
+        "obs": "grid",
+        "grid": 10,
+        "label": "学習済みAI (grid/CNN)",
+        "needs_gym_snake": True,  # SmallGridCNN must be importable to load it
+    },
+}
 
 
-def is_available() -> bool:
-    """True if the RL policy can actually be used (deps + model file present)."""
-    if not MODEL_PATH.exists():
+# -- availability & metadata ----------------------------------------------
+
+
+def is_available(name: str) -> bool:
+    """True if model ``name`` can actually be used (deps + file present)."""
+    cfg = _MODELS.get(name)
+    if cfg is None or not cfg["file"].exists():
         return False
     try:
         import stable_baselines3  # noqa: F401
+
+        if cfg["needs_gym_snake"]:
+            import gym_snake.policies  # noqa: F401
     except Exception:
         return False
     return True
 
 
+def required_grid(name: str):
+    """Board size model ``name`` requires, or ``None`` if size-independent."""
+    cfg = _MODELS.get(name)
+    return cfg["grid"] if cfg else None
+
+
+def strategies_meta() -> dict:
+    """Per-model metadata for the frontend (availability + required board)."""
+    return {
+        name: {
+            "label": cfg["label"],
+            "grid": cfg["grid"],
+            "available": is_available(name),
+        }
+        for name, cfg in _MODELS.items()
+    }
+
+
+# -- model loading (thread-safe, per model) -------------------------------
+
 _load_lock = threading.Lock()
-_model = None
+_models: dict[str, object] = {}
 
 
-def _load_model():
-    """Return the PPO policy, deserializing it exactly once (thread-safe)."""
-    global _model
-    if _model is not None:
-        return _model
+def _load_model(name: str):
+    """Return the PPO policy for ``name``, deserializing it once (thread-safe)."""
+    model = _models.get(name)
+    if model is not None:
+        return model
     with _load_lock:
-        if _model is None:  # double-checked: another thread may have loaded it
+        if name not in _models:
             from stable_baselines3 import PPO
 
-            # Force CPU: no GPU needed and the model is tiny.
-            _model = PPO.load(str(MODEL_PATH), device="cpu")
-    return _model
+            cfg = _MODELS[name]
+            if cfg["needs_gym_snake"]:
+                # Importing registers the custom SmallGridCNN class that the
+                # saved CNN model references at load time.
+                import gym_snake.policies  # noqa: F401
+
+            # Force CPU: no GPU needed.
+            _models[name] = PPO.load(str(cfg["file"]), device="cpu")
+    return _models[name]
 
 
-def warmup_async() -> None:
-    """Load the model in a background thread so the first move isn't slow.
+def warmup_async(name: str) -> None:
+    """Load model ``name`` in a background thread so the first move isn't slow.
 
-    Importing PyTorch and deserializing the policy takes a few seconds the very
-    first time. Kicking it off when a game is created (rather than on the first
-    ``/api/step/``) hides that latency. Safe to call repeatedly; it only ever
-    loads once.
+    Importing PyTorch and deserializing the policy takes a few seconds the first
+    time. Kicking it off when a game is created (rather than on the first
+    ``/api/step/``) hides that latency. Safe to call repeatedly.
     """
-    if not is_available() or _model is not None:
+    if not is_available(name) or name in _models:
         return
-    threading.Thread(target=_load_model, daemon=True).start()
+    threading.Thread(target=_load_model, args=(name,), daemon=True).start()
+
+
+# -- observations ----------------------------------------------------------
 
 
 def _heading_index(direction: str) -> int:
     return _HEADINGS.index(DIRECTIONS[direction])
 
 
-def build_observation(state: GameState):
+def build_observation(state: GameState, obs_type: str):
+    """Convert a Django game state into the requested gym_snake observation."""
+    if obs_type == "grid":
+        return _grid_observation(state)
+    return _feature_observation(state)
+
+
+def _feature_observation(state: GameState):
     """Recreate gym_snake's 11-feature observation from a Django game state.
 
-    Must stay byte-for-byte consistent with
-    ``gym_snake.envs.snake_env.SnakeEnv._feature_obs``.
+    Byte-for-byte consistent with ``SnakeEnv._feature_obs``.
     """
     import numpy as np
 
@@ -121,10 +183,32 @@ def build_observation(state: GameState):
     return np.asarray(feats, dtype=np.float32)
 
 
-def choose_direction(state: GameState) -> str:
-    """Return the absolute direction the PPO policy would take."""
-    model = _load_model()
-    obs = build_observation(state)
+def _grid_observation(state: GameState):
+    """Recreate gym_snake's (3, H, W) grid observation from a Django state.
+
+    Byte-for-byte consistent with ``SnakeEnv._grid_obs``:
+    channel 0 = body, channel 1 = head, channel 2 = food.
+    """
+    import numpy as np
+
+    g = state.grid
+    obs = np.zeros((3, g, g), dtype=np.float32)
+    for (x, y) in state.snake:
+        obs[0, y, x] = 1.0
+    hx, hy = state.snake[0]
+    obs[1, hy, hx] = 1.0
+    fx, fy = state.food
+    obs[2, fy, fx] = 1.0
+    return obs
+
+
+# -- action selection ------------------------------------------------------
+
+
+def choose_direction(state: GameState, name: str = "rl") -> str:
+    """Return the absolute direction model ``name`` would take."""
+    model = _load_model(name)
+    obs = build_observation(state, _MODELS[name]["obs"])
     action, _ = model.predict(obs, deterministic=True)
 
     hidx = _heading_index(state.direction)

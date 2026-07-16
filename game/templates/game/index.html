@@ -182,7 +182,8 @@
       AI
       <select id="strategySelect">
         <option value="search">探索AI (BFS)</option>
-        <option value="rl">学習済みAI (PPO)</option>
+        <option value="rl">学習済みAI (features/MLP)</option>
+        <option value="rl_cnn">学習済みAI (grid/CNN・10×10)</option>
       </select>
     </div>
     <button id="pauseBtn" class="secondary" disabled>一時停止</button>
@@ -225,6 +226,14 @@
       let highScore = Number(localStorage.getItem(HIGH_KEY) || 0);
       highScoreEl.textContent = highScore;
 
+      // Per-strategy metadata from the server: { grid: <int|null>, available }.
+      // grid is the board size a model requires (null = any size).
+      let strategyMeta = {};
+      const baseLabels = {};
+      strategySelect.querySelectorAll('option').forEach((o) => {
+        baseLabels[o.value] = o.textContent;
+      });
+
       async function api(path, body) {
         const res = await fetch(path, {
           method: 'POST',
@@ -244,17 +253,31 @@
         draw();
       }
 
+      // Can strategy `s` run on a board of the given size?
+      function fitsBoard(s, gridSize) {
+        const meta = strategyMeta[s];
+        if (!meta) return true;              // "search" isn't in the registry
+        return meta.grid == null || meta.grid === gridSize;
+      }
+
+      function applyStrategyMeta(meta) {
+        strategyMeta = meta || {};
+        Object.entries(strategyMeta).forEach(([value, m]) => {
+          const opt = strategySelect.querySelector('option[value="' + value + '"]');
+          if (!opt) return;
+          opt.disabled = !m.available;
+          opt.textContent = baseLabels[value] + (m.available ? '' : ' — 利用不可');
+        });
+        // If the current selection became unavailable, revert to search.
+        const cur = strategyMeta[strategySelect.value];
+        if (cur && !cur.available) strategySelect.value = 'search';
+      }
+
       async function newGame() {
         stopLoop();
-        const data = await api('/api/new/', { grid: 20 });
+        const data = await api('/api/new/', { strategy: strategySelect.value });
         gameId = data.game_id;
-        // Disable the PPO option if the server has no trained model / deps.
-        const rlOption = strategySelect.querySelector('option[value="rl"]');
-        if (!data.rl_available) {
-          rlOption.disabled = true;
-          rlOption.textContent = '学習済みAI (PPO) — 利用不可';
-          if (strategySelect.value === 'rl') strategySelect.value = 'search';
-        }
+        applyStrategyMeta(data.strategies);
         applyState(data.state);
         overlay.classList.add('hidden');
         running = true;
@@ -288,9 +311,15 @@
           return;
         }
         applyState(data.state);
-        const label = data.strategy === 'rl' ? '学習済みAI(PPO)' : '探索AI(BFS)';
+        const labels = {
+          search: '探索AI(BFS)',
+          rl: '学習済みAI(MLP)',
+          rl_cnn: '学習済みAI(CNN)',
+        };
+        const label = labels[data.strategy] || data.strategy;
         statusEl.innerHTML =
-          label + ' の選択: <span class="dir">' + data.direction + '</span>';
+          label + ' の選択: <span class="dir">' + data.direction +
+          '</span>　（盤面 ' + state.grid + '×' + state.grid + '）';
 
         if (data.state.game_over) {
           return endGame();
@@ -374,6 +403,15 @@
         stepDelay = 330 - Number(speedRange.value);
       });
       stepDelay = 330 - Number(speedRange.value);
+
+      // Changing the AI mid-game: if the new AI needs a different board size
+      // (the CNN requires 10x10), restart on the right board. Otherwise the
+      // switch is live and takes effect on the next tick.
+      strategySelect.addEventListener('change', () => {
+        if (running && state && !fitsBoard(strategySelect.value, state.grid)) {
+          newGame();
+        }
+      });
     })();
   </script>
 </body>

@@ -26,9 +26,15 @@
 | `game/views.py` | HTTP APIエンドポイント |
 | `game/templates/game/index.html` | フロントエンド（描画とAIループ） |
 
-## 2種類のAI
+## 3種類のAI
 
 画面上部のセレクタで、ヘビを動かすAIを切り替えられます（ゲーム中でも切替可）。
+
+| モード | 実装 | 盤面 |
+|--------|------|------|
+| 探索AI (BFS) | `game/ai.py` | 20×20 |
+| 学習済みAI (features/MLP) | `game/rl_agent.py` + `examples/ppo_snake_features.zip` | 20×20 |
+| 学習済みAI (grid/CNN) | `game/rl_agent.py` + `examples/ppo_snake_grid.zip` | **10×10 専用** |
 
 ### 1. 探索AI (BFS) — `game/ai.py`
 
@@ -40,21 +46,27 @@
 
 この戦略により、20×20の盤面でヘビは長さ50〜150以上まで自滅せずに成長します。
 
-### 2. 学習済みAI (PPO) — `game/rl_agent.py`
+### 2・3. 学習済みAI (PPO) — `game/rl_agent.py`
 
-`gym_snake` 環境で **強化学習（PPO）させた重み** （`examples/ppo_snake_features.zip`）を
-そのまま読み込んで動かします。
+`gym_snake` 環境で **強化学習（PPO）させた重み** をそのまま読み込んで動かします。
+`game/rl_agent.py` が、Djangoのゲーム状態を学習時と同一の観測に変換して推論し、
+モデルの相対行動（直進/右折/左折）を絶対方向へ戻します。
 
-- Djangoのゲーム状態を、学習時と同一の11次元 `features` 観測に変換して推論します。
-- この観測は**盤面サイズに依存しない**ため、10×10で学習したモデルが20×20でもそのまま動きます。
-- **依存の無い環境でも安全**: `stable-baselines3`/`torch` が未インストール、またはモデルファイルが
-  無い場合は自動的に探索AIへフォールバックし、フロント側では PPO オプションが選択不可になります。
-- 初回推論の遅延を隠すため、ゲーム作成時にモデルをバックグラウンドで事前ロードします。
+- **features/MLP** … 11次元の特徴ベクトル観測。**盤面サイズに依存しない**ため、10×10で
+  学習したモデルが20×20でもそのまま動きます。
+- **grid/CNN** … `(3, H, W)` の画像観測 + カスタムCNN（`gym_snake.policies.SmallGridCNN`）。
+  CNNのflatten→全結合層が学習時の **10×10 に固定**されているため、このAIを選ぶと盤面は
+  自動的に10×10で作成されます（他のAIはサイズ非依存なので、その10×10盤面でも動作します）。
+  20×20盤面でCNNを選ぶと、10×10で自動的に新規ゲームを開始します。
+- **依存の無い環境でも安全**: `stable-baselines3`/`torch`（CNNは加えて `gym_snake`）が未インストール、
+  またはモデルファイルが無い場合は自動的に探索AIへフォールバックし、フロント側では該当オプションが
+  選択不可になります。盤面サイズが合わない場合もサーバー側で探索AIにフォールバックします。
+- 初回推論の遅延を隠すため、ゲーム作成時に選択中のモデルをバックグラウンドで事前ロードします。
 
 学習済みAIを使うには追加依存が必要です（学習方法は [`gym_snake/README.md`](gym_snake/README.md) 参照）:
 
 ```bash
-pip install -e ".[train]"   # stable-baselines3 + torch
+pip install -e ".[train]"   # stable-baselines3 + torch（gym_snake も同時にインストール）
 ```
 
 ## セットアップと起動
@@ -74,8 +86,8 @@ python manage.py runserver
 | メソッド・パス | 説明 |
 |----------------|------|
 | `GET /` | ゲーム画面 |
-| `POST /api/new/` | 新規ゲームを作成し `game_id`・初期状態・`rl_available`（PPO利用可否）を返す |
-| `POST /api/step/` | AIが一手進め、更新後の状態を返す（body: `{"game_id": "...", "strategy": "search"\|"rl"}`）。レスポンスの `strategy` は実際に使われたAI（フォールバック時は `"search"`） |
+| `POST /api/new/` | 新規ゲームを作成（body: `{"strategy": ...}` で盤面サイズを決定）。`game_id`・初期状態・`strategies`（各AIの `available` と必要盤面サイズ `grid`）を返す |
+| `POST /api/step/` | AIが一手進め、更新後の状態を返す（body: `{"game_id": "...", "strategy": "search"\|"rl"\|"rl_cnn"}`）。レスポンスの `strategy` は実際に使われたAI（フォールバック時は `"search"`） |
 | `GET /api/state/?game_id=...` | 現在の状態を取得（進めない） |
 
 ## テスト

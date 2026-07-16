@@ -96,47 +96,85 @@ class AITests(TestCase):
 
 
 class RLAgentTests(TestCase):
-    def test_observation_shape_and_range(self):
+    def _mirror(self, env):
+        """Copy a gym SnakeEnv's live state into a Django GameState."""
+        s = GameState(grid=env.grid_size)
+        s.snake = list(env.snake)
+        s.food = env.food
+        s.direction = rl_agent._DIR_NAMES[env.heading_idx]
+        return s
+
+    def test_feature_observation_shape_and_range(self):
         s = GameState(grid=20)
-        obs = rl_agent.build_observation(s)
+        obs = rl_agent.build_observation(s, "features")
         self.assertEqual(obs.shape, (11,))
         self.assertTrue((obs >= 0).all() and (obs <= 1).all())
 
-    def test_observation_matches_gym_encoding(self):
-        """The Django->obs conversion must match gym_snake's feature encoding."""
+    def test_grid_observation_shape(self):
+        s = GameState(grid=10)
+        obs = rl_agent.build_observation(s, "grid")
+        self.assertEqual(obs.shape, (3, 10, 10))
+
+    def test_feature_observation_matches_gym_encoding(self):
         try:
             from gym_snake.envs import SnakeEnv
         except Exception:
             self.skipTest("gym_snake not importable")
+        import numpy as np
 
         env = SnakeEnv(grid_size=12, obs_type="features")
         env.reset(seed=0)
-        # Mirror the gym env's internal state into a Django GameState.
-        s = GameState(grid=12)
-        s.snake = list(env.snake)
-        s.food = env.food
-        s.direction = rl_agent._DIR_NAMES[env.heading_idx]
+        s = self._mirror(env)
+        self.assertTrue(
+            np.array_equal(rl_agent.build_observation(s, "features"), env._feature_obs())
+        )
 
+    def test_grid_observation_matches_gym_encoding(self):
+        try:
+            from gym_snake.envs import SnakeEnv
+        except Exception:
+            self.skipTest("gym_snake not importable")
         import numpy as np
 
-        self.assertTrue(np.array_equal(rl_agent.build_observation(s), env._feature_obs()))
+        env = SnakeEnv(grid_size=10, obs_type="grid")
+        env.reset(seed=1)
+        s = self._mirror(env)
+        self.assertTrue(
+            np.array_equal(rl_agent.build_observation(s, "grid"), env._grid_obs())
+        )
 
-    def test_choose_falls_back_to_search_when_rl_unavailable(self):
-        # An unknown strategy must never raise; it falls back to search.
+    def test_required_grid(self):
+        self.assertIsNone(rl_agent.required_grid("rl"))       # size-independent
+        self.assertEqual(rl_agent.required_grid("rl_cnn"), 10)  # CNN is fixed
+
+    def test_choose_falls_back_to_search_when_unknown(self):
         s = GameState(grid=20)
         direction, used = ai.choose(s, strategy="does-not-exist")
         self.assertEqual(used, "search")
         self.assertIn(direction, ("up", "down", "left", "right"))
 
+    def test_cnn_on_wrong_board_size_falls_back(self):
+        # The CNN needs a 10x10 board; on 20x20 it must fall back to search.
+        s = GameState(grid=20)
+        _, used = ai.choose(s, strategy="rl_cnn")
+        self.assertEqual(used, "search")
+
     def test_rl_returns_valid_direction_when_available(self):
-        if not rl_agent.is_available():
-            self.skipTest("trained model / stable-baselines3 not available")
+        if not rl_agent.is_available("rl"):
+            self.skipTest("features model / stable-baselines3 not available")
         s = GameState(grid=20)
         direction, used = ai.choose(s, strategy="rl")
         self.assertEqual(used, "rl")
+        self.assertNotEqual(direction, "left")  # never reverse (starts right)
+
+    def test_cnn_returns_valid_direction_when_available(self):
+        if not rl_agent.is_available("rl_cnn"):
+            self.skipTest("grid/CNN model not available")
+        s = GameState(grid=10)  # CNN's required board size
+        direction, used = ai.choose(s, strategy="rl_cnn")
+        self.assertEqual(used, "rl_cnn")
         self.assertIn(direction, ("up", "down", "left", "right"))
-        # The RL agent must never reverse into the neck.
-        self.assertNotEqual(direction, "left")  # snake starts heading right
+        self.assertNotEqual(direction, "left")
 
 
 class ViewTests(TestCase):
