@@ -64,6 +64,12 @@ python examples/train_sb3.py --obs grid --timesteps 500000
 > 参考: 観測（`features`）だけを見る単純な貪欲方策でも 10×10 盤面で平均スコア
 > 約19点に達します（ランダムは0点）。観測に十分な学習シグナルが含まれています。
 
+### 学習結果
+
+PPOで実際に学習させた結果（学習曲線・スコア推移・学習済みモデル）は
+[`examples/TRAINING_RESULTS.md`](../examples/TRAINING_RESULTS.md) にまとめています。
+2Mステップの学習で平均スコア約23点（ランダムは0点）に到達しました。
+
 ## テスト
 
 ```bash

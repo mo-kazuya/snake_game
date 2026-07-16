@@ -54,7 +54,13 @@ def main() -> None:
     env = DummyVecEnv([make_env_fn(args.grid, args.obs) for _ in range(args.n_envs)])
 
     # CnnPolicy expects channel-first image obs, which SnakeEnv already provides.
-    model = PPO(policy, env, verbose=1, n_steps=256, batch_size=256)
+    # These hyperparameters reproduce the run in examples/TRAINING_RESULTS.md
+    # (10x10, features, 2M steps -> mean score ~23).
+    model = PPO(
+        policy, env, verbose=1,
+        n_steps=512, batch_size=512,
+        gamma=0.99, gae_lambda=0.95, ent_coef=0.01, learning_rate=3e-4,
+    )
     model.learn(total_timesteps=args.timesteps)
     model.save(args.out)
     print(f"saved model to {args.out}")
