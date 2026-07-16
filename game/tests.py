@@ -143,21 +143,32 @@ class RLAgentTests(TestCase):
             np.array_equal(rl_agent.build_observation(s, "grid"), env._grid_obs())
         )
 
+    def test_ego_observation_matches_gym_encoding(self):
+        """The CNN's ego observation must equal what the env produced in training."""
+        try:
+            from gym_snake.envs import SnakeEnv
+        except Exception:
+            self.skipTest("gym_snake not importable")
+        import numpy as np
+
+        for grid in (10, 20):
+            env = SnakeEnv(grid_size=grid, obs_type="ego")
+            env.reset(seed=2)
+            s = self._mirror(env)
+            self.assertTrue(
+                np.array_equal(rl_agent.build_observation(s, "ego"), env._get_obs())
+            )
+
     def test_required_grid(self):
-        self.assertIsNone(rl_agent.required_grid("rl"))       # size-independent
-        self.assertEqual(rl_agent.required_grid("rl_cnn"), 10)  # CNN is fixed
+        # Both RL models are board-size independent.
+        self.assertIsNone(rl_agent.required_grid("rl"))
+        self.assertIsNone(rl_agent.required_grid("rl_cnn"))
 
     def test_choose_falls_back_to_search_when_unknown(self):
         s = GameState(grid=20)
         direction, used = ai.choose(s, strategy="does-not-exist")
         self.assertEqual(used, "search")
         self.assertIn(direction, ("up", "down", "left", "right"))
-
-    def test_cnn_on_wrong_board_size_falls_back(self):
-        # The CNN needs a 10x10 board; on 20x20 it must fall back to search.
-        s = GameState(grid=20)
-        _, used = ai.choose(s, strategy="rl_cnn")
-        self.assertEqual(used, "search")
 
     def test_rl_returns_valid_direction_when_available(self):
         if not rl_agent.is_available("rl"):
@@ -167,14 +178,14 @@ class RLAgentTests(TestCase):
         self.assertEqual(used, "rl")
         self.assertNotEqual(direction, "left")  # never reverse (starts right)
 
-    def test_cnn_returns_valid_direction_when_available(self):
+    def test_cnn_works_on_any_board_size(self):
         if not rl_agent.is_available("rl_cnn"):
-            self.skipTest("grid/CNN model not available")
-        s = GameState(grid=10)  # CNN's required board size
-        direction, used = ai.choose(s, strategy="rl_cnn")
-        self.assertEqual(used, "rl_cnn")
-        self.assertIn(direction, ("up", "down", "left", "right"))
-        self.assertNotEqual(direction, "left")
+            self.skipTest("ego/CNN model not available")
+        for grid in (10, 20):
+            s = GameState(grid=grid)
+            direction, used = ai.choose(s, strategy="rl_cnn")
+            self.assertEqual(used, "rl_cnn", f"grid={grid}")
+            self.assertIn(direction, ("up", "down", "right"))  # never reverse
 
 
 class ViewTests(TestCase):

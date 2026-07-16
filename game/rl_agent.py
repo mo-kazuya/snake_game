@@ -7,9 +7,12 @@ Two reinforcement-learning models were trained in the ``gym_snake`` environment
 * ``"rl"``      — an MLP on the **11-dim ``features`` observation**. The feature
                   encoding is *independent of the board size*, so it runs on any
                   Django board (default 20x20).
-* ``"rl_cnn"``  — a CNN on the **``(3, H, W)`` ``grid`` observation**. The CNN's
-                  flatten->linear head is fixed to the ``10x10`` board it trained
-                  on, so this model **only runs on a 10x10 board**.
+* ``"rl_cnn"``  — a CNN on the **egocentric ``ego`` observation** (head-centered,
+                  heading-up rotated local view + whole-board minimap, fixed
+                  ``(5, 11, 11)`` shape). Because the observation shape never
+                  depends on the board, this model **also runs on any board
+                  size** — it was curriculum-trained on 10x10 then fine-tuned
+                  on 20x20.
 
 This module converts a Django :class:`~game.engine.GameState` into the matching
 observation, asks the policy for an action, and converts the relative action
@@ -48,11 +51,13 @@ _MODELS = {
         "needs_gym_snake": False,
     },
     "rl_cnn": {
-        "file": _EXAMPLES / "ppo_snake_grid.zip",
-        "obs": "grid",
-        "grid": 10,
-        "label": "学習済みAI (grid/CNN)",
-        "needs_gym_snake": True,  # SmallGridCNN must be importable to load it
+        "file": _EXAMPLES / "ppo_snake_ego.zip",
+        "obs": "ego",
+        "grid": None,  # ego observation has a fixed shape -> any board size
+        "label": "学習済みAI (ego/CNN)",
+        # gym_snake supplies both the saved model's feature-extractor class and
+        # the shared ego-observation builder.
+        "needs_gym_snake": True,
     },
 }
 
@@ -142,6 +147,13 @@ def build_observation(state: GameState, obs_type: str):
     """Convert a Django game state into the requested gym_snake observation."""
     if obs_type == "grid":
         return _grid_observation(state)
+    if obs_type == "ego":
+        # Single source of truth: the exact function SnakeEnv uses in training.
+        from gym_snake.obs import ego_observation
+
+        return ego_observation(
+            state.snake, state.food, state.grid, _heading_index(state.direction)
+        )
     return _feature_observation(state)
 
 

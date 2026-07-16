@@ -32,9 +32,9 @@
 
 | モード | 実装 | 盤面 |
 |--------|------|------|
-| 探索AI (BFS) | `game/ai.py` | 20×20 |
-| 学習済みAI (features/MLP) | `game/rl_agent.py` + `examples/ppo_snake_features.zip` | 20×20 |
-| 学習済みAI (grid/CNN) | `game/rl_agent.py` + `examples/ppo_snake_grid.zip` | **10×10 専用** |
+| 探索AI (BFS) | `game/ai.py` | 任意（既定 20×20） |
+| 学習済みAI (features/MLP) | `game/rl_agent.py` + `examples/ppo_snake_features.zip` | 任意（既定 20×20） |
+| 学習済みAI (ego/CNN) | `game/rl_agent.py` + `examples/ppo_snake_ego.zip` | 任意（既定 20×20） |
 
 ### 1. 探索AI (BFS) — `game/ai.py`
 
@@ -54,13 +54,13 @@
 
 - **features/MLP** … 11次元の特徴ベクトル観測。**盤面サイズに依存しない**ため、10×10で
   学習したモデルが20×20でもそのまま動きます。
-- **grid/CNN** … `(3, H, W)` の画像観測 + カスタムCNN（`gym_snake.policies.SmallGridCNN`）。
-  CNNのflatten→全結合層が学習時の **10×10 に固定**されているため、このAIを選ぶと盤面は
-  自動的に10×10で作成されます（他のAIはサイズ非依存なので、その10×10盤面でも動作します）。
-  20×20盤面でCNNを選ぶと、10×10で自動的に新規ゲームを開始します。
+- **ego/CNN** … **自己中心（egocentric）観測** + CNN。頭を中心に進行方向が常に上になるよう
+  回転した11×11の局所ウィンドウと、盤面全体を11×11に縮約したミニマップの計5チャンネル
+  （`gym_snake/obs.py`）。観測形状が `(5, 11, 11)` 固定なので **こちらも盤面サイズ非依存**です。
+  10×10で3M→20×20で1.5Mステップのカリキュラム学習済み（20×20で平均約61エサ）。
 - **依存の無い環境でも安全**: `stable-baselines3`/`torch`（CNNは加えて `gym_snake`）が未インストール、
   またはモデルファイルが無い場合は自動的に探索AIへフォールバックし、フロント側では該当オプションが
-  選択不可になります。盤面サイズが合わない場合もサーバー側で探索AIにフォールバックします。
+  選択不可になります。
 - 初回推論の遅延を隠すため、ゲーム作成時に選択中のモデルをバックグラウンドで事前ロードします。
 
 学習済みAIを使うには追加依存が必要です（学習方法は [`gym_snake/README.md`](gym_snake/README.md) 参照）:

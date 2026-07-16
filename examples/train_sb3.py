@@ -9,8 +9,12 @@ Then:
     # fast MLP training on the compact feature observation
     python examples/train_sb3.py --obs features --timesteps 200000
 
-    # CNN training on the grid observation
-    python examples/train_sb3.py --obs grid --timesteps 500000
+    # CNN on the egocentric observation (recommended CNN setup; the obs shape
+    # is board-size independent, so the trained model runs on any grid)
+    python examples/train_sb3.py --obs ego --timesteps 3000000
+
+    # CNN on the raw full-board grid observation (weights tied to this --grid)
+    python examples/train_sb3.py --obs grid --timesteps 3000000
 
 The trained model is saved to ``ppo_snake.zip`` and a short greedy evaluation
 is printed at the end.
@@ -34,7 +38,7 @@ def make_env_fn(grid: int, obs_type: str):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train PPO on gym_snake")
-    parser.add_argument("--obs", choices=["features", "grid"], default="features")
+    parser.add_argument("--obs", choices=["features", "grid", "ego"], default="features")
     parser.add_argument("--grid", type=int, default=12)
     parser.add_argument("--timesteps", type=int, default=200_000)
     parser.add_argument("--n-envs", type=int, default=8)
@@ -61,17 +65,17 @@ def main() -> None:
             gamma=0.99, gae_lambda=0.95, ent_coef=0.01, learning_rate=3e-4,
         )
     else:
-        # SB3's default NatureCNN can't handle a 10x10 board; use a small,
-        # stride-1 CNN instead. AnyGridCNN (CoordConv + adaptive pooling) is
-        # additionally board-size independent, so one set of weights runs on
-        # any grid — reload for another size with policies.load_ppo_for_grid.
+        # Both CNN setups use SmallGridCNN (stride-1; SB3's default NatureCNN
+        # collapses on boards this small):
         #
-        # Learning from raw pixels is far less sample-efficient than from the
-        # hand-crafted features. A constant-LR / low-entropy run plateaus around
-        # mean score ~2; more exploration (higher ent_coef), larger, less
-        # frequently-updated rollouts, and a decaying learning rate break past
-        # that plateau.
-        from gym_snake.policies import any_grid_policy_kwargs
+        # * --obs ego (recommended): head-centered, heading-up rotated local
+        #   view + minimap. Fixed (5, 11, 11) shape -> the trained model runs
+        #   on ANY board size, and it learns far faster than raw grid pixels
+        #   (mean ~45 on 10x10 in 3M steps vs ~14.5 for raw grid).
+        # * --obs grid: raw (3, H, W) board pixels; the flatten head ties the
+        #   weights to this --grid size, and learning is slow (a constant-LR /
+        #   low-entropy run plateaus at mean ~2; this tuned recipe reaches ~15).
+        from gym_snake.policies import cnn_policy_kwargs
 
         def linear_decay(progress_remaining: float) -> float:
             return 3e-4 * progress_remaining
@@ -81,7 +85,7 @@ def main() -> None:
             n_steps=1024, batch_size=2048, n_epochs=5,
             gamma=0.99, gae_lambda=0.95, ent_coef=0.02,
             learning_rate=linear_decay,
-            policy_kwargs=any_grid_policy_kwargs(),
+            policy_kwargs=cnn_policy_kwargs(),
         )
     model.learn(total_timesteps=args.timesteps)
     model.save(args.out)

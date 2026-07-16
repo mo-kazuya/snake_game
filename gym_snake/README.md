@@ -36,6 +36,7 @@ print(info)  # {'score': ..., 'length': ..., 'steps': ...}
 | **行動空間** | `Discrete(3)` — `0`=直進 / `1`=右折 / `2`=左折（相対方向。逆走による即死が無く学習しやすい） |
 | **観測 `obs_type="grid"`**（既定） | `Box(0,1, shape=(3, H, W), float32)`。チャンネル `[体, 頭, エサ]`。CNN向け |
 | **観測 `obs_type="features"`** | `Box(0,1, shape=(11,), float32)`。危険センサ3＋進行方向one-hot4＋エサ方向4。MLP向け・高速 |
+| **観測 `obs_type="ego"`** | `Box(0,1, shape=(5, 11, 11), float32)`。頭中心・進行方向が上になるよう回転した局所ビュー＋盤面ミニマップ（`gym_snake/obs.py`）。**形状が盤面サイズ非依存**なので1つのモデルが任意の盤面で動く。CNN向け・**推奨** |
 | **報酬** | エサ `+1.0` ／ 死亡 `-1.0` ／ 毎ステップ `-0.005` ／ （任意）エサに近づくと `±0.05` のシェイピング |
 | **終了 terminated** | 壁 or 自分の体に衝突（または盤面を埋め尽くしてクリア） |
 | **打ち切り truncated** | エサを取らずに `max_steps_without_food`（既定 `H*W`）ステップ経過 |
@@ -45,7 +46,7 @@ print(info)  # {'score': ..., 'length': ..., 'steps': ...}
 | 引数 | 既定 | 説明 |
 |------|------|------|
 | `grid_size` | `12` | 盤面の一辺のマス数（`>=5`） |
-| `obs_type` | `"grid"` | `"grid"` または `"features"` |
+| `obs_type` | `"grid"` | `"grid"` / `"features"` / `"ego"` |
 | `reward_shaping` | `True` | エサへの接近/離反に応じた小報酬の有無 |
 | `max_steps_without_food` | `H*W` | 空回り防止の打ち切り上限 |
 | `render_mode` | `None` | `"ansi"` / `"rgb_array"` / `"human"` |
@@ -73,10 +74,13 @@ PPOで実際に学習させた結果（学習曲線・スコア推移・学習�
 - **`grid` 観測 (CNN)**: 3Mステップで平均スコア約14.5点。小盤面向けのカスタムCNN
   （[`gym_snake/policies.py`](policies.py) の `SmallGridCNN`）を使用。生ピクセルからの
   学習はサンプル効率が劣るため、探索強化・学習率減衰でプラトーを突破しています。
+- **`ego` 観測 (CNN・サイズ非依存)**: 10×10で3Mステップ → **平均約45点**（gridの3倍、
+  featuresの2倍）。観測形状が固定のため同じモデルが任意の盤面で動き、20×20への
+  ゼロショット転移で平均53.5点、1.5Mステップのファインチューニングで**平均61.4点**。
 
 ```bash
-# grid観測 + CNN で学習
-python examples/train_sb3.py --obs grid --grid 10 --timesteps 3000000
+# ego観測 + CNN で学習（推奨）
+python examples/train_sb3.py --obs ego --grid 10 --timesteps 3000000
 ```
 
 ## テスト
@@ -85,4 +89,4 @@ python examples/train_sb3.py --obs grid --grid 10 --timesteps 3000000
 pytest gym_snake/tests/
 ```
 
-Gymnasium の `check_env` によるAPI準拠チェックを両観測モードで含みます。
+Gymnasium の `check_env` によるAPI準拠チェックを全観測モードで含みます。

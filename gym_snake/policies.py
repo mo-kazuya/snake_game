@@ -59,7 +59,16 @@ def cnn_policy_kwargs(features_dim: int = 256) -> dict:
 
 
 class AnyGridCNN(BaseFeaturesExtractor):
-    """Board-size-independent CNN for the grid observation.
+    """Board-size-independent CNN for the raw grid observation.
+
+    .. warning::
+        Kept for reference — in practice this extractor **failed to train** on
+        Snake (mean score flatlined near 0 after 1M PPO steps). The global
+        pooling destroys single-pixel relative geometry (head-vs-neck
+        orientation, adjacent danger) that the policy needs. The working
+        size-independent approach is the egocentric observation
+        (``obs_type="ego"``, see :mod:`gym_snake.obs`), whose **fixed-shape
+        observation** makes a plain flatten CNN size-independent instead.
 
     :class:`SmallGridCNN` flattens the ``64 x H x W`` feature map into a linear
     layer, tying the weights to the one board size it was trained on. This
