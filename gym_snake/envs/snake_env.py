@@ -72,8 +72,8 @@ class SnakeEnv(gym.Env):
         super().__init__()
         if grid_size < 5:
             raise ValueError("grid_size must be >= 5")
-        if obs_type not in ("grid", "features"):
-            raise ValueError("obs_type must be 'grid' or 'features'")
+        if obs_type not in ("grid", "features", "ego"):
+            raise ValueError("obs_type must be 'grid', 'features' or 'ego'")
 
         self.grid_size = grid_size
         self.obs_type = obs_type
@@ -93,6 +93,16 @@ class SnakeEnv(gym.Env):
             self.observation_space = spaces.Box(
                 low=0.0, high=1.0,
                 shape=(3, grid_size, grid_size), dtype=np.float32,
+            )
+        elif obs_type == "ego":
+            # Egocentric view + minimap: fixed shape for EVERY board size, so
+            # one trained model transfers across grid sizes (see gym_snake.obs).
+            from gym_snake import obs as ego_obs
+
+            self.observation_space = spaces.Box(
+                low=0.0, high=1.0,
+                shape=(ego_obs.CHANNELS, ego_obs.WINDOW, ego_obs.WINDOW),
+                dtype=np.float32,
             )
         else:  # "features"
             self.observation_space = spaces.Box(
@@ -194,6 +204,12 @@ class SnakeEnv(gym.Env):
     def _get_obs(self):
         if self.obs_type == "grid":
             return self._grid_obs()
+        if self.obs_type == "ego":
+            from gym_snake.obs import ego_observation
+
+            return ego_observation(
+                self.snake, self.food, self.grid_size, self.heading_idx
+            )
         return self._feature_obs()
 
     def _grid_obs(self) -> np.ndarray:
