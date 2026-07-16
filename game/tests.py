@@ -199,6 +199,34 @@ class ViewTests(TestCase):
         self.assertIn("game_id", data)
         self.assertEqual(data["state"]["grid"], 20)
 
+    def test_new_game_accepts_various_grid_sizes(self):
+        for grid in (10, 14, 30, 40):
+            res = self.client.post(
+                "/api/new/", data=json.dumps({"grid": grid}),
+                content_type="application/json",
+            )
+            data = res.json()
+            self.assertEqual(data["state"]["grid"], grid)
+            # The snake starts mid-board with room to move on every size.
+            head = data["state"]["snake"][0]
+            self.assertTrue(0 < head[0] < grid and 0 < head[1] < grid)
+
+    def test_new_game_clamps_grid(self):
+        for sent, expected in ((2, 8), (100, 50)):
+            res = self.client.post(
+                "/api/new/", data=json.dumps({"grid": sent}),
+                content_type="application/json",
+            )
+            self.assertEqual(res.json()["state"]["grid"], expected)
+
+    def test_new_game_invalid_grid_falls_back_to_default(self):
+        res = self.client.post(
+            "/api/new/", data=json.dumps({"grid": "abc"}),
+            content_type="application/json",
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["state"]["grid"], 20)
+
     def test_step_advances_game(self):
         new = self.client.post("/api/new/", content_type="application/json").json()
         gid = new["game_id"]

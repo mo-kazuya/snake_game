@@ -41,9 +41,13 @@ def new_game(request):
     data = _parse_body(request)
     strategy = data.get("strategy", "search")
 
-    # The board size is driven by the chosen AI: the CNN model only runs on the
-    # 10x10 board it was trained on; everything else uses the default 20x20.
-    grid = rl_agent.required_grid(strategy) or int(data.get("grid", 20))
+    # Board size: the client picks it freely (all current AIs are size-
+    # independent); a model that requires a specific board would override it.
+    try:
+        grid = int(data.get("grid", 20))
+    except (TypeError, ValueError):
+        grid = 20
+    grid = rl_agent.required_grid(strategy) or grid
     grid = max(8, min(grid, 50))  # keep the board sane
 
     game_id, state = store.create(grid=grid)

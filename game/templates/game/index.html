@@ -186,6 +186,16 @@
         <option value="rl_cnn">学習済みAI (ego/CNN)</option>
       </select>
     </div>
+    <div class="mode">
+      盤面
+      <select id="gridSelect">
+        <option value="10">10×10</option>
+        <option value="14">14×14</option>
+        <option value="20" selected>20×20</option>
+        <option value="30">30×30</option>
+        <option value="40">40×40</option>
+      </select>
+    </div>
     <button id="pauseBtn" class="secondary" disabled>一時停止</button>
     <button id="restartBtn" class="secondary">新規ゲーム</button>
     <div class="speed">
@@ -212,6 +222,7 @@
       const restartBtn = document.getElementById('restartBtn');
       const speedRange = document.getElementById('speedRange');
       const strategySelect = document.getElementById('strategySelect');
+      const gridSelect = document.getElementById('gridSelect');
       const statusEl = document.getElementById('status');
 
       let gameId = null;
@@ -222,8 +233,13 @@
       let timer = null;
       let CELL = 20;
 
-      const HIGH_KEY = 'aiSnakeHighScore';
-      let highScore = Number(localStorage.getItem(HIGH_KEY) || 0);
+      // High scores are kept per board size (a 10x10 score and a 40x40 score
+      // are not comparable).
+      function highKey(grid) { return 'aiSnakeHighScore_' + grid; }
+      function loadHighScore(grid) {
+        return Number(localStorage.getItem(highKey(grid)) || 0);
+      }
+      let highScore = loadHighScore(Number(gridSelect.value));
       highScoreEl.textContent = highScore;
 
       // Per-strategy metadata from the server: { grid: <int|null>, available }.
@@ -275,10 +291,15 @@
 
       async function newGame() {
         stopLoop();
-        const data = await api('/api/new/', { strategy: strategySelect.value });
+        const data = await api('/api/new/', {
+          strategy: strategySelect.value,
+          grid: Number(gridSelect.value),
+        });
         gameId = data.game_id;
         applyStrategyMeta(data.strategies);
         applyState(data.state);
+        highScore = loadHighScore(data.state.grid);
+        highScoreEl.textContent = highScore;
         overlay.classList.add('hidden');
         running = true;
         paused = false;
@@ -332,7 +353,7 @@
         pauseBtn.disabled = true;
         if (state.score > highScore) {
           highScore = state.score;
-          localStorage.setItem(HIGH_KEY, highScore);
+          localStorage.setItem(highKey(state.grid), highScore);
           highScoreEl.textContent = highScore;
         }
         const won = state.length >= state.grid * state.grid;
@@ -404,13 +425,22 @@
       });
       stepDelay = 330 - Number(speedRange.value);
 
-      // Changing the AI mid-game: if the new AI needs a different board size
-      // (the CNN requires 10x10), restart on the right board. Otherwise the
-      // switch is live and takes effect on the next tick.
+      // Changing the AI mid-game: if the new AI needs a different board size,
+      // restart on the right board. Otherwise the switch is live and takes
+      // effect on the next tick. (All current AIs run on any size.)
       strategySelect.addEventListener('change', () => {
         if (running && state && !fitsBoard(strategySelect.value, state.grid)) {
           newGame();
         }
+      });
+
+      // The board size is authoritative on the server, so changing it starts a
+      // new game. When idle, just show the chosen size's high score — the next
+      // start picks the size up.
+      gridSelect.addEventListener('change', () => {
+        highScore = loadHighScore(Number(gridSelect.value));
+        highScoreEl.textContent = highScore;
+        if (running) newGame();
       });
     })();
   </script>
