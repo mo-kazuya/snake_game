@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>スネークゲーム</title>
+  <style>
+    :root {
+      --bg: #1a1a2e;
+      --panel: #16213e;
+      --accent: #4ade80;
+      --accent-dark: #22c55e;
+      --food: #f43f5e;
+      --grid: #0f3460;
+      --text: #e2e8f0;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, "Segoe UI", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    h1 {
+      font-size: 1.6rem;
+      margin-bottom: 12px;
+      color: var(--accent);
+      letter-spacing: 0.05em;
+    }
+
+    .scoreboard {
+      display: flex;
+      gap: 24px;
+      margin-bottom: 12px;
+      font-size: 1rem;
+    }
+
+    .scoreboard span { color: var(--accent); font-weight: bold; }
+
+    .stage {
+      position: relative;
+      background: var(--panel);
+      border-radius: 12px;
+      padding: 10px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+    }
+
+    canvas {
+      display: block;
+      background: var(--grid);
+      border-radius: 8px;
+      touch-action: none;
+    }
+
+    .overlay {
+      position: absolute;
+      inset: 10px;
+      background: rgba(22, 33, 62, 0.92);
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      text-align: center;
+      padding: 20px;
+    }
+
+    .overlay.hidden { display: none; }
+
+    .overlay h2 { font-size: 1.4rem; color: var(--accent); }
+    .overlay p { font-size: 0.95rem; line-height: 1.6; opacity: 0.9; }
+
+    button {
+      background: var(--accent);
+      color: #06281a;
+      border: none;
+      border-radius: 8px;
+      padding: 12px 28px;
+      font-size: 1rem;
+      font-weight: bold;
+      cursor: pointer;
+      transition: transform 0.08s ease, background 0.2s ease;
+    }
+
+    button:hover { background: var(--accent-dark); }
+    button:active { transform: scale(0.96); }
+
+    .hint {
+      margin-top: 14px;
+      font-size: 0.8rem;
+      opacity: 0.6;
+      text-align: center;
+      line-height: 1.6;
+    }
+
+    /* On-screen controls for touch devices */
+    .dpad {
+      margin-top: 16px;
+      display: grid;
+      grid-template-columns: repeat(3, 60px);
+      grid-template-rows: repeat(3, 60px);
+      gap: 8px;
+    }
+
+    .dpad button {
+      width: 60px;
+      height: 60px;
+      padding: 0;
+      font-size: 1.4rem;
+      background: var(--panel);
+      color: var(--accent);
+      border: 1px solid var(--grid);
+    }
+    .dpad button:hover { background: var(--grid); }
+
+    .dpad .up    { grid-column: 2; grid-row: 1; }
+    .dpad .left  { grid-column: 1; grid-row: 2; }
+    .dpad .right { grid-column: 3; grid-row: 2; }
+    .dpad .down  { grid-column: 2; grid-row: 3; }
+
+    @media (min-width: 640px) {
+      .dpad { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <h1>🐍 スネークゲーム</h1>
+
+  <div class="scoreboard">
+    <div>スコア: <span id="score">0</span></div>
+    <div>ハイスコア: <span id="highScore">0</span></div>
+  </div>
+
+  <div class="stage">
+    <canvas id="board" width="400" height="400"></canvas>
+    <div class="overlay" id="overlay">
+      <h2 id="overlayTitle">スネークゲーム</h2>
+      <p id="overlayText">
+        矢印キー / WASD で操作<br>
+        エサを食べて成長しよう！
+      </p>
+      <button id="startBtn">スタート</button>
+    </div>
+  </div>
+
+  <div class="dpad" aria-hidden="true">
+    <button class="up"    data-dir="up">▲</button>
+    <button class="left"  data-dir="left">◀</button>
+    <button class="right" data-dir="right">▶</button>
+    <button class="down"  data-dir="down">▼</button>
+  </div>
+
+  <div class="hint">
+    矢印キー / WASD で移動 ・ スペースで一時停止<br>
+    スマホはスワイプまたは画面下のボタンで操作
+  </div>
+
+  <script>
+    (function () {
+      const canvas = document.getElementById('board');
+      const ctx = canvas.getContext('2d');
+      const scoreEl = document.getElementById('score');
+      const highScoreEl = document.getElementById('highScore');
+      const overlay = document.getElementById('overlay');
+      const overlayTitle = document.getElementById('overlayTitle');
+      const overlayText = document.getElementById('overlayText');
+      const startBtn = document.getElementById('startBtn');
+
+      const GRID = 20;                       // number of cells per row/column
+      const CELL = canvas.width / GRID;      // pixel size of a cell
+      const STEP_START = 140;                // ms between moves at start
+      const STEP_MIN = 70;                   // fastest speed cap
+
+      let snake, dir, nextDir, food, score, step, running, paused, loopId;
+
+      const HIGH_KEY = 'snakeHighScore';
+      let highScore = Number(localStorage.getItem(HIGH_KEY) || 0);
+      highScoreEl.textContent = highScore;
+
+      function reset() {
+        snake = [
+          { x: 8, y: 10 },
+          { x: 7, y: 10 },
+          { x: 6, y: 10 },
+        ];
+        dir = { x: 1, y: 0 };
+        nextDir = { x: 1, y: 0 };
+        score = 0;
+        step = STEP_START;
+        scoreEl.textContent = score;
+        placeFood();
+      }
+
+      function placeFood() {
+        let spot;
+        do {
+          spot = {
+            x: Math.floor(Math.random() * GRID),
+            y: Math.floor(Math.random() * GRID),
+          };
+        } while (snake.some((s) => s.x === spot.x && s.y === spot.y));
+        food = spot;
+      }
+
+      function startGame() {
+        reset();
+        overlay.classList.add('hidden');
+        running = true;
+        paused = false;
+        scheduleTick();
+      }
+
+      function scheduleTick() {
+        clearTimeout(loopId);
+        loopId = setTimeout(tick, step);
+      }
+
+      function tick() {
+        if (!running || paused) return;
+        update();
+        draw();
+        scheduleTick();
+      }
+
+      function update() {
+        dir = nextDir;
+        const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
+
+        // Wall collision
+        if (head.x < 0 || head.x >= GRID || head.y < 0 || head.y >= GRID) {
+          return gameOver();
+        }
+        // Self collision
+        if (snake.some((s) => s.x === head.x && s.y === head.y)) {
+          return gameOver();
+        }
+
+        snake.unshift(head);
+
+        if (head.x === food.x && head.y === food.y) {
+          score += 10;
+          scoreEl.textContent = score;
+          step = Math.max(STEP_MIN, step - 4); // speed up gradually
+          placeFood();
+        } else {
+          snake.pop();
+        }
+      }
+
+      function draw() {
+        // Background
+        ctx.fillStyle = '#0f3460';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Subtle grid lines
+        ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+        ctx.lineWidth = 1;
+        for (let i = 1; i < GRID; i++) {
+          ctx.beginPath();
+          ctx.moveTo(i * CELL, 0);
+          ctx.lineTo(i * CELL, canvas.height);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(0, i * CELL);
+          ctx.lineTo(canvas.width, i * CELL);
+          ctx.stroke();
+        }
+
+        // Food
+        drawCell(food.x, food.y, '#f43f5e', true);
+
+        // Snake
+        snake.forEach((seg, i) => {
+          const color = i === 0 ? '#4ade80' : '#22c55e';
+          drawCell(seg.x, seg.y, color);
+        });
+      }
+
+      function drawCell(x, y, color, circle) {
+        const px = x * CELL;
+        const py = y * CELL;
+        ctx.fillStyle = color;
+        if (circle) {
+          ctx.beginPath();
+          ctx.arc(px + CELL / 2, py + CELL / 2, CELL / 2 - 2, 0, Math.PI * 2);
+          ctx.fill();
+        } else {
+          const r = 4;
+          roundRect(px + 1, py + 1, CELL - 2, CELL - 2, r);
+          ctx.fill();
+        }
+      }
+
+      function roundRect(x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + w, y, x + w, y + h, r);
+        ctx.arcTo(x + w, y + h, x, y + h, r);
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
+      }
+
+      function gameOver() {
+        running = false;
+        clearTimeout(loopId);
+        if (score > highScore) {
+          highScore = score;
+          localStorage.setItem(HIGH_KEY, highScore);
+          highScoreEl.textContent = highScore;
+        }
+        overlayTitle.textContent = 'ゲームオーバー';
+        overlayText.innerHTML = `スコア: <b>${score}</b><br>ハイスコア: <b>${highScore}</b>`;
+        startBtn.textContent = 'もう一度';
+        overlay.classList.remove('hidden');
+      }
+
+      function setDirection(name) {
+        const map = {
+          up: { x: 0, y: -1 },
+          down: { x: 0, y: 1 },
+          left: { x: -1, y: 0 },
+          right: { x: 1, y: 0 },
+        };
+        const d = map[name];
+        if (!d) return;
+        // Prevent reversing directly onto itself
+        if (d.x === -dir.x && d.y === -dir.y) return;
+        nextDir = d;
+      }
+
+      function togglePause() {
+        if (!running) return;
+        paused = !paused;
+        if (paused) {
+          overlayTitle.textContent = '一時停止';
+          overlayText.textContent = 'スペースキーで再開';
+          startBtn.textContent = '再開';
+          overlay.classList.remove('hidden');
+        } else {
+          overlay.classList.add('hidden');
+          scheduleTick();
+        }
+      }
+
+      // Keyboard
+      document.addEventListener('keydown', (e) => {
+        const keyMap = {
+          ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right',
+          w: 'up', s: 'down', a: 'left', d: 'right',
+          W: 'up', S: 'down', A: 'left', D: 'right',
+        };
+        if (keyMap[e.key]) {
+          e.preventDefault();
+          setDirection(keyMap[e.key]);
+        } else if (e.key === ' ') {
+          e.preventDefault();
+          if (running) togglePause();
+          else startGame();
+        }
+      });
+
+      // On-screen d-pad
+      document.querySelectorAll('.dpad button').forEach((btn) => {
+        btn.addEventListener('click', () => setDirection(btn.dataset.dir));
+      });
+
+      // Touch swipe
+      let touchStart = null;
+      canvas.addEventListener('touchstart', (e) => {
+        touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      }, { passive: true });
+      canvas.addEventListener('touchmove', (e) => {
+        if (!touchStart) return;
+        const dx = e.touches[0].clientX - touchStart.x;
+        const dy = e.touches[0].clientY - touchStart.y;
+        if (Math.abs(dx) < 20 && Math.abs(dy) < 20) return;
+        if (Math.abs(dx) > Math.abs(dy)) {
+          setDirection(dx > 0 ? 'right' : 'left');
+        } else {
+          setDirection(dy > 0 ? 'down' : 'up');
+        }
+        touchStart = null;
+      }, { passive: true });
+
+      startBtn.addEventListener('click', () => {
+        if (paused) togglePause();
+        else startGame();
+      });
+
+      // Initial idle draw
+      reset();
+      draw();
+    })();
+  </script>
+</body>
+</html>
