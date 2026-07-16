@@ -68,3 +68,26 @@ python manage.py test
 
 - ルートの `index.html` は、**人間が矢印キーで操作する** スタンドアロン版（Django不要）です。AI版とは別物として残しています。
 - ゲーム状態はプロセス内メモリに保持します。複数ワーカーで運用する場合は `game/store.py` をRedisやDBなどの共有バックエンドに差し替えてください。
+
+---
+
+## 🤖 強化学習用の環境 (gym_snake)
+
+エージェントを **学習** させるための Gymnasium 形式の環境も同梱しています
+（`gym_snake/` パッケージ）。行動空間・観測空間・報酬設計や使い方は
+[`gym_snake/README.md`](gym_snake/README.md) を参照してください。
+
+```bash
+pip install -e .                         # gym_snake をインストール
+python examples/random_agent.py --render # 動作確認
+python examples/train_sb3.py --obs features --timesteps 200000  # PPOで学習
+```
+
+## このリポジトリの構成
+
+| ディレクトリ / ファイル | 内容 |
+|-------------------------|------|
+| `index.html` | 人間が遊ぶスタンドアロン版（Django不要） |
+| `snakeai/`, `game/`, `manage.py` | **AIが自動操作するDjango版**（サーバー側でAIが思考） |
+| `gym_snake/` | **強化学習用のGymnasium環境**（エージェント学習用） |
+| `examples/` | gym_snake のサンプル（ランダム方策・PPO学習） |

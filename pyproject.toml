@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gym_snake"
+version = "0.1.0"
+description = "A Gymnasium environment for training Snake-playing reinforcement-learning agents"
+readme = "gym_snake/README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "gymnasium>=0.29",
+    "numpy>=1.21",
+]
+
+[project.optional-dependencies]
+train = ["stable-baselines3>=2.0", "torch"]
+render = ["pygame>=2.1"]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools]
+packages = ["gym_snake", "gym_snake.envs", "gym_snake.tests"]
