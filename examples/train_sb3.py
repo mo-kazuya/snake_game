@@ -50,17 +50,24 @@ def main() -> None:
             '    pip install "stable-baselines3>=2.0" torch'
         )
 
-    policy = "MlpPolicy" if args.obs == "features" else "CnnPolicy"
     env = DummyVecEnv([make_env_fn(args.grid, args.obs) for _ in range(args.n_envs)])
 
-    # CnnPolicy expects channel-first image obs, which SnakeEnv already provides.
-    # These hyperparameters reproduce the run in examples/TRAINING_RESULTS.md
-    # (10x10, features, 2M steps -> mean score ~23).
-    model = PPO(
-        policy, env, verbose=1,
+    # These hyperparameters reproduce the runs in examples/TRAINING_RESULTS.md.
+    common = dict(
         n_steps=512, batch_size=512,
         gamma=0.99, gae_lambda=0.95, ent_coef=0.01, learning_rate=3e-4,
     )
+    if args.obs == "features":
+        model = PPO("MlpPolicy", env, verbose=1, **common)
+    else:
+        # SB3's default NatureCNN can't handle a 10x10 board; use a small,
+        # stride-1 CNN that preserves the board resolution.
+        from gym_snake.policies import cnn_policy_kwargs
+
+        model = PPO(
+            "CnnPolicy", env, verbose=1,
+            policy_kwargs=cnn_policy_kwargs(), **common,
+        )
     model.learn(total_timesteps=args.timesteps)
     model.save(args.out)
     print(f"saved model to {args.out}")
