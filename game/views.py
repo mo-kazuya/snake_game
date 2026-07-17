@@ -53,7 +53,7 @@ def new_game(request):
     game_id, state = store.create(grid=grid)
 
     # Preload the selected RL policy in the background so its first move is fast.
-    if strategy in ("rl", "rl_cnn"):
+    if strategy in rl_agent.MODEL_NAMES:
         rl_agent.warmup_async(strategy)
 
     return JsonResponse(

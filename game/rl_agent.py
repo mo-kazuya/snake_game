@@ -59,7 +59,17 @@ _MODELS = {
         # the shared ego-observation builder.
         "needs_gym_snake": True,
     },
+    "rl_trf": {
+        "file": _EXAMPLES / "ppo_snake_transformer.zip",
+        "obs": "ego",
+        "grid": None,
+        "label": "学習済みAI (ego/Transformer)",
+        "needs_gym_snake": True,  # EgoTransformer class lives in gym_snake
+    },
 }
+
+# Public set of RL strategy names for dispatchers (ai.choose, views).
+MODEL_NAMES = frozenset(_MODELS)
 
 
 # -- availability & metadata ----------------------------------------------

@@ -107,16 +107,16 @@ def choose(state: GameState, strategy: str = "search") -> tuple[str, str]:
 
     ``strategy`` is ``"search"`` (the BFS/flood-fill AI below) or one of the
     trained PPO policies in :mod:`game.rl_agent` (``"rl"`` = features/MLP,
-    ``"rl_cnn"`` = grid/CNN). If an RL strategy is requested but unavailable,
-    runs on the wrong board size, or errors at runtime, this transparently
-    falls back to the search AI.
+    ``"rl_cnn"`` = ego/CNN, ``"rl_trf"`` = ego/Transformer). If an RL strategy
+    is requested but unavailable, runs on the wrong board size, or errors at
+    runtime, this transparently falls back to the search AI.
 
     Returns ``(direction, strategy_used)`` so the caller can tell whether a
     fallback happened.
     """
-    if strategy in ("rl", "rl_cnn"):
-        from . import rl_agent
+    from . import rl_agent
 
+    if strategy in rl_agent.MODEL_NAMES:
         req = rl_agent.required_grid(strategy)
         size_ok = req is None or state.grid == req
         if size_ok and rl_agent.is_available(strategy):

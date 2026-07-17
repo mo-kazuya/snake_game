@@ -39,6 +39,11 @@ def make_env_fn(grid: int, obs_type: str):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train PPO on gym_snake")
     parser.add_argument("--obs", choices=["features", "grid", "ego"], default="features")
+    parser.add_argument(
+        "--arch", choices=["cnn", "transformer"], default="cnn",
+        help="feature extractor for image observations (ego/grid); "
+             "'transformer' is only supported with --obs ego",
+    )
     parser.add_argument("--grid", type=int, default=12)
     parser.add_argument("--timesteps", type=int, default=200_000)
     parser.add_argument("--n-envs", type=int, default=8)
@@ -75,7 +80,22 @@ def main() -> None:
         # * --obs grid: raw (3, H, W) board pixels; the flatten head ties the
         #   weights to this --grid size, and learning is slow (a constant-LR /
         #   low-entropy run plateaus at mean ~2; this tuned recipe reaches ~15).
-        from gym_snake.policies import cnn_policy_kwargs
+        # * --arch transformer (--obs ego only): ViT-style EgoTransformer.
+        #   Works, but is far less sample-efficient than the CNN on this task
+        #   (mean ~11 vs ~36 at 1.5M steps on 10x10) and ~3x slower per step
+        #   on CPU — kept for comparison and experimentation.
+        if args.arch == "transformer":
+            if args.obs != "ego":
+                raise SystemExit("--arch transformer requires --obs ego")
+            from gym_snake.policies import transformer_policy_kwargs
+
+            policy_kwargs = transformer_policy_kwargs(
+                d_model=64, num_layers=2, dim_feedforward=128, patch_size=2,
+            )
+        else:
+            from gym_snake.policies import cnn_policy_kwargs
+
+            policy_kwargs = cnn_policy_kwargs()
 
         def linear_decay(progress_remaining: float) -> float:
             return 3e-4 * progress_remaining
@@ -85,7 +105,7 @@ def main() -> None:
             n_steps=1024, batch_size=2048, n_epochs=5,
             gamma=0.99, gae_lambda=0.95, ent_coef=0.02,
             learning_rate=linear_decay,
-            policy_kwargs=cnn_policy_kwargs(),
+            policy_kwargs=policy_kwargs,
         )
     model.learn(total_timesteps=args.timesteps)
     model.save(args.out)

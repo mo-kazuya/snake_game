@@ -184,6 +184,7 @@
         <option value="search">探索AI (BFS)</option>
         <option value="rl">学習済みAI (features/MLP)</option>
         <option value="rl_cnn">学習済みAI (ego/CNN)</option>
+        <option value="rl_trf">学習済みAI (ego/Transformer)</option>
       </select>
     </div>
     <div class="mode">
@@ -336,6 +337,7 @@
           search: '探索AI(BFS)',
           rl: '学習済みAI(MLP)',
           rl_cnn: '学習済みAI(CNN)',
+          rl_trf: '学習済みAI(Transformer)',
         };
         const label = labels[data.strategy] || data.strategy;
         statusEl.innerHTML =

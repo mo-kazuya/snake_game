@@ -187,6 +187,15 @@ class RLAgentTests(TestCase):
             self.assertEqual(used, "rl_cnn", f"grid={grid}")
             self.assertIn(direction, ("up", "down", "right"))  # never reverse
 
+    def test_transformer_works_on_any_board_size(self):
+        if not rl_agent.is_available("rl_trf"):
+            self.skipTest("ego/Transformer model not available")
+        for grid in (10, 20):
+            s = GameState(grid=grid)
+            direction, used = ai.choose(s, strategy="rl_trf")
+            self.assertEqual(used, "rl_trf", f"grid={grid}")
+            self.assertIn(direction, ("up", "down", "right"))  # never reverse
+
 
 class ViewTests(TestCase):
     def test_new_game_returns_state(self):

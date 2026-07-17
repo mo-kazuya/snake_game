@@ -26,7 +26,7 @@
 | `game/views.py` | HTTP APIエンドポイント |
 | `game/templates/game/index.html` | フロントエンド（描画とAIループ） |
 
-## 3種類のAI
+## 4種類のAI
 
 画面上部のセレクタで、ヘビを動かすAIを切り替えられます（ゲーム中でも切替可）。
 
@@ -35,6 +35,7 @@
 | 探索AI (BFS) | `game/ai.py` | 任意（既定 20×20） |
 | 学習済みAI (features/MLP) | `game/rl_agent.py` + `examples/ppo_snake_features.zip` | 任意（既定 20×20） |
 | 学習済みAI (ego/CNN) | `game/rl_agent.py` + `examples/ppo_snake_ego.zip` | 任意（既定 20×20） |
+| 学習済みAI (ego/Transformer) | `game/rl_agent.py` + `examples/ppo_snake_transformer.zip` | 任意（既定 20×20） |
 
 ### 1. 探索AI (BFS) — `game/ai.py`
 
@@ -46,7 +47,7 @@
 
 この戦略により、20×20の盤面でヘビは長さ50〜150以上まで自滅せずに成長します。
 
-### 2・3. 学習済みAI (PPO) — `game/rl_agent.py`
+### 2〜4. 学習済みAI (PPO) — `game/rl_agent.py`
 
 `gym_snake` 環境で **強化学習（PPO）させた重み** をそのまま読み込んで動かします。
 `game/rl_agent.py` が、Djangoのゲーム状態を学習時と同一の観測に変換して推論し、
@@ -60,7 +61,11 @@
   10×10で3M→20×20で1.5Mのカリキュラム学習後、**8〜40の複数サイズ混合で計5M
   ステップの追加ファインチューニング済み**。8×8〜40×40の全サイズで実用的な強さです
   （20×20で平均約59エサ、30×30で約71エサ、40×40で約75エサ）。
-- **依存の無い環境でも安全**: `stable-baselines3`/`torch`（CNNは加えて `gym_snake`）が未インストール、
+- **ego/Transformer** … 同じego観測を **ViT型Transformer**（2×2パッチ+CLSトークン、
+  `gym_snake.policies.EgoTransformer`）で処理する比較・教材用モデル。同一レシピの
+  公平な比較で**サンプル効率・実行速度ともCNNに大きく劣る**結果でした（小盤面で平均
+  10〜17エサ、大盤面は苦手）。詳細な分析は `examples/TRAINING_RESULTS.md` を参照。
+- **依存の無い環境でも安全**: `stable-baselines3`/`torch`（CNN/Transformerは加えて `gym_snake`）が未インストール、
   またはモデルファイルが無い場合は自動的に探索AIへフォールバックし、フロント側では該当オプションが
   選択不可になります。
 - 初回推論の遅延を隠すため、ゲーム作成時に選択中のモデルをバックグラウンドで事前ロードします。
