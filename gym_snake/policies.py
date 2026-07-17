@@ -144,12 +144,20 @@ class EgoTransformer(BaseFeaturesExtractor):
         nhead: int = 4,
         num_layers: int = 3,
         dim_feedforward: int = 256,
+        patch_size: int = 2,
     ):
         super().__init__(observation_space, features_dim)
         c, h, w = observation_space.shape
-        self.n_tokens = h * w
+        # Pad H/W up to a multiple of patch_size, then embed each patch with a
+        # strided conv (the standard ViT patch embedding). patch_size=1 is the
+        # per-cell tokenization; patch_size=2 quarters the token count, which
+        # cuts the quadratic attention cost ~10x — important on CPU.
+        self.patch_size = patch_size
+        self._pad_h = (patch_size - h % patch_size) % patch_size
+        self._pad_w = (patch_size - w % patch_size) % patch_size
+        self.n_tokens = ((h + self._pad_h) // patch_size) * ((w + self._pad_w) // patch_size)
 
-        self.embed = nn.Linear(c, d_model)
+        self.embed = nn.Conv2d(c, d_model, kernel_size=patch_size, stride=patch_size)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
         self.pos_embed = nn.Parameter(torch.zeros(1, self.n_tokens + 1, d_model))
         nn.init.trunc_normal_(self.cls_token, std=0.02)
@@ -165,8 +173,11 @@ class EgoTransformer(BaseFeaturesExtractor):
 
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
         b = observations.shape[0]
-        # (B, C, H, W) -> (B, HW, C) -> token embeddings
-        x = self.embed(observations.flatten(2).transpose(1, 2))
+        x = observations
+        if self._pad_h or self._pad_w:
+            x = nn.functional.pad(x, (0, self._pad_w, 0, self._pad_h))
+        # (B, C, H, W) -> (B, d_model, H/p, W/p) -> (B, tokens, d_model)
+        x = self.embed(x).flatten(2).transpose(1, 2)
         cls = self.cls_token.expand(b, -1, -1)
         x = torch.cat([cls, x], dim=1) + self.pos_embed
         x = self.encoder(x)
