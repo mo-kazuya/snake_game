@@ -121,6 +121,67 @@ def any_grid_policy_kwargs(features_dim: int = 256) -> dict:
     )
 
 
+class EgoTransformer(BaseFeaturesExtractor):
+    """ViT-style Transformer feature extractor for the ego observation.
+
+    Each of the ``H x W`` cells of the ``(C, H, W)`` observation becomes one
+    token (a linear projection of its C channel values) plus a learned
+    positional embedding; a CLS token aggregates the board through
+    ``num_layers`` pre-norm Transformer encoder blocks, and its final embedding
+    is projected to ``features_dim``.
+
+    Because the ego observation already has a fixed shape for every board
+    size, this extractor — like the CNN — is board-size independent. Dropout
+    is disabled by default: stochastic policies during PPO rollouts hurt more
+    than they regularize.
+    """
+
+    def __init__(
+        self,
+        observation_space: gym.spaces.Box,
+        features_dim: int = 256,
+        d_model: int = 64,
+        nhead: int = 4,
+        num_layers: int = 3,
+        dim_feedforward: int = 256,
+    ):
+        super().__init__(observation_space, features_dim)
+        c, h, w = observation_space.shape
+        self.n_tokens = h * w
+
+        self.embed = nn.Linear(c, d_model)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.n_tokens + 1, d_model))
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+        layer = nn.TransformerEncoderLayer(
+            d_model, nhead, dim_feedforward,
+            dropout=0.0, activation="gelu", batch_first=True, norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(layer, num_layers)
+        self.norm = nn.LayerNorm(d_model)
+        self.head = nn.Sequential(nn.Linear(d_model, features_dim), nn.ReLU())
+
+    def forward(self, observations: torch.Tensor) -> torch.Tensor:
+        b = observations.shape[0]
+        # (B, C, H, W) -> (B, HW, C) -> token embeddings
+        x = self.embed(observations.flatten(2).transpose(1, 2))
+        cls = self.cls_token.expand(b, -1, -1)
+        x = torch.cat([cls, x], dim=1) + self.pos_embed
+        x = self.encoder(x)
+        return self.head(self.norm(x[:, 0]))
+
+
+def transformer_policy_kwargs(features_dim: int = 256, **kwargs) -> dict:
+    """policy_kwargs for a PPO ``CnnPolicy`` using :class:`EgoTransformer`."""
+    return dict(
+        features_extractor_class=EgoTransformer,
+        features_extractor_kwargs=dict(features_dim=features_dim, **kwargs),
+        normalize_images=False,
+    )
+
+
 def load_ppo_for_grid(path, grid_size: int, device: str = "cpu", env=None):
     """Load a saved PPO model rebound to a ``grid_size`` x ``grid_size`` board.
 

@@ -13,7 +13,7 @@ from gym_snake.envs import SnakeEnv
 torch = pytest.importorskip("torch")
 pytest.importorskip("stable_baselines3")
 
-from gym_snake.policies import AnyGridCNN, SmallGridCNN  # noqa: E402
+from gym_snake.policies import AnyGridCNN, EgoTransformer, SmallGridCNN  # noqa: E402
 
 
 def test_extractor_output_shape():
@@ -56,3 +56,32 @@ def test_any_grid_cnn_weights_transfer_across_sizes():
         obs, _ = env.reset(seed=0)
         out = ext(torch.as_tensor(obs).unsqueeze(0))
         assert out.shape == (1, 256)
+
+
+def test_ego_transformer_output_shape():
+    env = SnakeEnv(grid_size=10, obs_type="ego")
+    extractor = EgoTransformer(env.observation_space, features_dim=256)
+    obs, _ = env.reset(seed=0)
+    out = extractor(torch.as_tensor(obs).unsqueeze(0))
+    assert out.shape == (1, 256)
+
+
+def test_ego_transformer_same_weights_any_board_size():
+    """The ego obs shape is fixed, so one extractor serves every board size."""
+    extractor = EgoTransformer(
+        SnakeEnv(grid_size=10, obs_type="ego").observation_space, features_dim=128
+    )
+    for grid in (8, 20, 40):
+        env = SnakeEnv(grid_size=grid, obs_type="ego")
+        obs, _ = env.reset(seed=0)
+        out = extractor(torch.as_tensor(obs).unsqueeze(0))
+        assert out.shape == (1, 128)
+
+
+def test_ego_transformer_batch():
+    env = SnakeEnv(grid_size=10, obs_type="ego")
+    extractor = EgoTransformer(env.observation_space, features_dim=64, d_model=32,
+                               num_layers=2, dim_feedforward=64)
+    obs, _ = env.reset(seed=0)
+    batch = torch.as_tensor(obs).unsqueeze(0).repeat(16, 1, 1, 1)
+    assert extractor(batch).shape == (16, 64)
