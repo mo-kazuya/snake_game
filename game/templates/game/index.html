@@ -416,10 +416,13 @@
           highScoreEl.textContent = highScore;
         }
         const won = state.length >= state.grid * state.grid;
-        overlayTitle.textContent = won ? 'AIクリア！ 🎉' : 'ゲームオーバー';
+        overlayTitle.textContent = won
+          ? 'AIクリア！ 🎉'
+          : (state.stalled ? '行き詰まり（タイムアウト）' : 'ゲームオーバー');
         overlayText.innerHTML =
           'スコア: <b>' + state.score + '</b>　長さ: <b>' + state.length +
-          '</b><br>手数: <b>' + state.steps + '</b>';
+          '</b><br>手数: <b>' + state.steps + '</b>' +
+          (state.stalled ? '<br><small>エサに辿り着けないまま時間切れになりました</small>' : '');
         startBtn.textContent = 'もう一度';
         overlay.classList.remove('hidden');
         statusEl.textContent = '';
