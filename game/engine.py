@@ -31,6 +31,13 @@ class GameState:
     score: int = 0
     steps: int = 0
     game_over: bool = False
+    steps_since_food: int = 0
+    # True if the game ended because too many steps passed without eating,
+    # rather than a collision. A memoryless AI (see ai.py) can settle into
+    # repeating the same loop forever with no food in sight; this stall
+    # timeout guarantees the game always ends regardless of how the AI
+    # behaves. Mirrors gym_snake's SnakeEnv truncation (max_steps_without_food).
+    stalled: bool = False
 
     def __post_init__(self) -> None:
         if not self.snake:
@@ -45,7 +52,9 @@ class GameState:
         self.direction = "right"
         self.score = 0
         self.steps = 0
+        self.steps_since_food = 0
         self.game_over = False
+        self.stalled = False
         self.place_food()
 
     def place_food(self) -> None:
@@ -94,9 +103,14 @@ class GameState:
         self.steps += 1
         if ate:
             self.score += 10
+            self.steps_since_food = 0
             self.place_food()
         else:
             self.snake.pop()
+            self.steps_since_food += 1
+            if self.steps_since_food >= self.grid * self.grid:
+                self.game_over = True
+                self.stalled = True
 
         return {"moved": True, "ate": ate, "dead": self.game_over}
 
@@ -115,8 +129,10 @@ class GameState:
             "food": list(self.food),
             "score": self.score,
             "steps": self.steps,
+            "steps_since_food": self.steps_since_food,
             "length": len(self.snake),
             "game_over": self.game_over,
+            "stalled": self.stalled,
         }
 
     @classmethod
@@ -127,5 +143,7 @@ class GameState:
         state.food = tuple(data["food"])
         state.score = data["score"]
         state.steps = data.get("steps", 0)
+        state.steps_since_food = data.get("steps_since_food", 0)
         state.game_over = data["game_over"]
+        state.stalled = data.get("stalled", False)
         return state

@@ -4,9 +4,11 @@ The browser is a thin renderer. All game state and all AI decisions live here
 on the server:
 
     POST /api/new/    -> create a game, return its id and initial state
-    POST /api/step/   -> let the AI make one move, return the new state
     GET  /api/state/  -> read the current state without advancing
 
+The frequent per-tick move is *not* HTTP: once a game exists, the browser
+opens a WebSocket to ``ws/game/<game_id>/`` (see ``game/consumers.py``) and
+sends one small message per step instead of a full request/response cycle.
 State is passed as JSON. The AI direction is computed in ``ai.choose_direction``.
 """
 
@@ -19,7 +21,7 @@ from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
-from . import ai, rl_agent, store
+from . import rl_agent, store
 
 
 def index(request):
@@ -61,29 +63,6 @@ def new_game(request):
             "game_id": game_id,
             "state": state.to_dict(),
             "strategies": rl_agent.strategies_meta(),
-        }
-    )
-
-
-@csrf_exempt
-@require_POST
-def step(request):
-    data = _parse_body(request)
-    game_id = data.get("game_id")
-    state = store.get(game_id) if game_id else None
-    if state is None:
-        return JsonResponse({"error": "unknown game_id"}, status=404)
-
-    strategy = data.get("strategy", "search")
-    direction, used = ai.choose(state, strategy)
-    event = state.step(direction)
-    return JsonResponse(
-        {
-            "game_id": game_id,
-            "direction": direction,
-            "strategy": used,
-            "event": event,
-            "state": state.to_dict(),
         }
     )
 

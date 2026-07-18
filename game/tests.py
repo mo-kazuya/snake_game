@@ -1,10 +1,15 @@
-"""Tests for the Snake engine, AI, and HTTP endpoints."""
+"""Tests for the Snake engine, AI, and HTTP/WebSocket endpoints."""
 
 from __future__ import annotations
 
 import json
+from collections import deque
+from unittest import mock
 
+from channels.testing import WebsocketCommunicator
 from django.test import TestCase
+
+from snakeai.asgi import application
 
 from . import ai, rl_agent
 from .engine import GameState
@@ -57,6 +62,42 @@ class EngineTests(TestCase):
         self.assertEqual(restored.snake, s.snake)
         self.assertEqual(restored.food, s.food)
         self.assertEqual(restored.score, s.score)
+        self.assertEqual(restored.steps_since_food, s.steps_since_food)
+        self.assertEqual(restored.stalled, s.stalled)
+
+    def test_stall_without_food_ends_game(self):
+        """A move that doesn't reach food, once too many have piled up,
+        must end the game even though it's perfectly legal (see ai.py's
+        anti-loop tiebreaker for why this backstop exists)."""
+        s = GameState(grid=10)
+        s.snake = [(5, 5), (5, 6), (5, 7)]
+        s.direction = "up"
+        s.food = (0, 0)
+        s.steps_since_food = s.grid * s.grid - 1  # one step from the limit
+        event = s.step("left")
+        self.assertTrue(event["moved"])
+        self.assertFalse(event["ate"])
+        self.assertTrue(event["dead"])
+        self.assertTrue(s.game_over)
+        self.assertTrue(s.stalled)
+
+    def test_stall_flag_absent_on_normal_death(self):
+        s = GameState(grid=10)
+        s.snake = [(9, 5), (8, 5), (7, 5)]
+        s.direction = "right"
+        s.step("right")  # wall collision
+        self.assertTrue(s.game_over)
+        self.assertFalse(s.stalled)
+
+    def test_eating_resets_stall_counter(self):
+        s = GameState(grid=10)
+        s.snake = [(5, 5), (4, 5), (3, 5)]
+        s.direction = "right"
+        s.food = (6, 5)
+        s.steps_since_food = 50
+        event = s.step("right")
+        self.assertTrue(event["ate"])
+        self.assertEqual(s.steps_since_food, 0)
 
 
 class AITests(TestCase):
@@ -93,6 +134,35 @@ class AITests(TestCase):
             s.step(ai.choose_direction(s))
         # The safe-seeking AI should reach a decent score before any death.
         self.assertGreaterEqual(s.score, 30)
+
+    def test_survival_tiebreak_avoids_recently_visited_cell(self):
+        """Ties in survival mode should be broken by recency, not always the
+        same fixed direction -- otherwise the AI can settle into repeating
+        the exact same loop forever."""
+        grid = 21
+        mid = grid // 2
+        s = GameState(grid=grid)
+        s.snake = [(mid, mid), (mid, mid + 1), (mid, mid + 2)]  # heading "up"
+        s.direction = "up"
+        s.food = (0, 0)  # irrelevant here; _bfs is patched out below
+
+        # Force branch 2 (survival) regardless of food placement: with no
+        # safe path ever found, left/right/up are an exact tie by symmetry
+        # on an open board.
+        with mock.patch.object(ai, "_bfs", return_value=None):
+            baseline = ai.choose_direction(s)
+
+        landing = {
+            "up": (mid, mid - 1),
+            "left": (mid - 1, mid),
+            "right": (mid + 1, mid),
+        }[baseline]
+        s._ai_recent_heads = deque([landing] * 10, maxlen=64)
+
+        with mock.patch.object(ai, "_bfs", return_value=None):
+            biased = ai.choose_direction(s)
+
+        self.assertNotEqual(biased, baseline)
 
 
 class RLAgentTests(TestCase):
@@ -236,26 +306,62 @@ class ViewTests(TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()["state"]["grid"], 20)
 
-    def test_step_advances_game(self):
-        new = self.client.post("/api/new/", content_type="application/json").json()
-        gid = new["game_id"]
-        res = self.client.post(
-            "/api/step/", data=json.dumps({"game_id": gid}),
-            content_type="application/json",
-        )
-        self.assertEqual(res.status_code, 200)
-        data = res.json()
-        self.assertIn(data["direction"], ("up", "down", "left", "right"))
-        self.assertIn("state", data)
-
-    def test_unknown_game_id_404s(self):
-        res = self.client.post(
-            "/api/step/", data=json.dumps({"game_id": "nope"}),
-            content_type="application/json",
-        )
-        self.assertEqual(res.status_code, 404)
-
     def test_index_renders(self):
         res = self.client.get("/")
         self.assertEqual(res.status_code, 200)
         self.assertContains(res, "AIスネークゲーム")
+
+
+class GameConsumerTests(TestCase):
+    """The per-step move now travels over a WebSocket (game/consumers.py)."""
+
+    async def test_step_advances_game(self):
+        new = self.client.post("/api/new/", content_type="application/json").json()
+        gid = new["game_id"]
+        communicator = WebsocketCommunicator(application, f"/ws/game/{gid}/")
+        connected, _ = await communicator.connect()
+        self.assertTrue(connected)
+
+        await communicator.send_json_to({"strategy": "search"})
+        data = await communicator.receive_json_from()
+        self.assertIn(data["direction"], ("up", "down", "left", "right"))
+        self.assertEqual(data["strategy"], "search")
+        self.assertIn("state", data)
+
+        await communicator.disconnect()
+
+    async def test_multiple_steps_over_one_connection(self):
+        new = self.client.post("/api/new/", content_type="application/json").json()
+        gid = new["game_id"]
+        communicator = WebsocketCommunicator(application, f"/ws/game/{gid}/")
+        await communicator.connect()
+
+        steps_seen = 0
+        for _ in range(5):
+            await communicator.send_json_to({"strategy": "search"})
+            data = await communicator.receive_json_from()
+            steps_seen = data["state"]["steps"]
+
+        self.assertEqual(steps_seen, 5)
+        await communicator.disconnect()
+
+    async def test_unknown_game_id_sends_error_and_closes(self):
+        # Well-formed (32 hex chars, matches the route) but no such game.
+        communicator = WebsocketCommunicator(application, f"/ws/game/{'0' * 32}/")
+        connected, _ = await communicator.connect()
+        self.assertTrue(connected)  # the consumer accepts, then rejects
+
+        data = await communicator.receive_json_from()
+        self.assertEqual(data["error"], "unknown game_id")
+
+        close = await communicator.receive_output()
+        self.assertEqual(close["type"], "websocket.close")
+        self.assertEqual(close.get("code"), 4404)
+
+    async def test_malformed_game_id_is_refused_by_routing(self):
+        # Doesn't match the route's 32-hex-char pattern at all: Channels'
+        # URLRouter has no fallback to route to, so the connection is refused
+        # before it ever reaches GameConsumer.
+        communicator = WebsocketCommunicator(application, "/ws/game/not-a-valid-id/")
+        with self.assertRaises(ValueError):
+            await communicator.connect()

@@ -9,7 +9,10 @@ Strategy (in priority order):
 
 2. **Survive.** If there is no safe path to the food, move toward the tail /
    into the largest open area (measured by flood fill) to buy time until a
-   safe path opens up.
+   safe path opens up. Ties are broken in favor of cells not recently
+   visited, so a snake with no goal-directed path doesn't settle into
+   repeating the exact same loop forever (GameState's stall timeout in
+   engine.py is the hard backstop for pockets with no way out at all).
 
 3. **Last resort.** If nothing is safe, take any legal move so the engine —
    not the AI — decides the game is over.
@@ -102,6 +105,23 @@ def _opposite(direction, current):
     return (dx, dy) == (-cx, -cy)
 
 
+def _record_head(state: GameState) -> deque:
+    """Per-game short-term memory of recently visited head cells.
+
+    Stashed directly on the ``GameState`` instance rather than a module-level
+    registry, so its lifetime is simply tied to the game's own -- no cleanup
+    needed when a game is evicted from the store. Pure AI bookkeeping, not
+    authoritative game state, so it deliberately isn't part of
+    ``to_dict()``/``from_dict()``.
+    """
+    recent = getattr(state, "_ai_recent_heads", None)
+    if recent is None:
+        recent = deque(maxlen=max(32, state.grid * 2))
+        state._ai_recent_heads = recent
+    recent.append(state.snake[0])
+    return recent
+
+
 def choose(state: GameState, strategy: str = "search") -> tuple[str, str]:
     """Pick a direction using the requested strategy.
 
@@ -134,6 +154,7 @@ def choose_direction(state: GameState) -> str:
     snake = state.snake
     head = snake[0]
     food = state.food
+    recent = _record_head(state)
 
     legal = [
         d
@@ -160,14 +181,24 @@ def choose_direction(state: GameState) -> str:
         after = _simulate(snake, direction, food, grid)
         if after is None:
             return -1
-        blocked = set(after[:-1])
+        # Exclude the new head itself (`after[0]`) from `blocked`: flood
+        # fill starts there, and `_flood_fill_size` short-circuits to 0 if
+        # the start cell is in `blocked` -- silently disabling this
+        # heuristic for every direction. The tail (`after[-1]`) is excluded
+        # too, same "frees up next tick" convention as `_reachable_tail`.
+        blocked = set(after[1:-1])
         return _flood_fill_size(after[0], blocked, grid)
 
-    # Prefer moves that keep the tail reachable, then maximize open space.
-    def score(direction: str) -> tuple[int, int]:
+    # Prefer moves that keep the tail reachable, then maximize open space,
+    # then prefer a cell not recently visited. Without that last tiebreaker,
+    # revisiting the exact same board state would always yield the exact
+    # same decision, so a snake with no goal-directed path could repeat the
+    # same loop forever.
+    def score(direction: str) -> tuple[int, int, int]:
         after = _simulate(snake, direction, food, grid)
         tail_ok = 1 if (after and _reachable_tail(after, food, grid)) else 0
-        return (tail_ok, openness(direction))
+        fresh = 0 if (after and after[0] in recent) else 1
+        return (tail_ok, openness(direction), fresh)
 
     return max(legal, key=score)
 
