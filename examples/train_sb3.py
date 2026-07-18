@@ -81,9 +81,10 @@ def main() -> None:
         #   weights to this --grid size, and learning is slow (a constant-LR /
         #   low-entropy run plateaus at mean ~2; this tuned recipe reaches ~15).
         # * --arch transformer (--obs ego only): ViT-style EgoTransformer.
-        #   Works, but is far less sample-efficient than the CNN on this task
-        #   (mean ~11 vs ~36 at 1.5M steps on 10x10) and ~3x slower per step
-        #   on CPU — kept for comparison and experimentation.
+        #   Works, but plain PPO from scratch is far less sample-efficient than
+        #   the CNN on this task (mean ~11 vs ~36 at 1.5M steps on 10x10).
+        #   The strong recipe for this architecture is imitation learning from
+        #   the search AI + PPO fine-tuning: see train_transformer_v2.py.
         if args.arch == "transformer":
             if args.obs != "ego":
                 raise SystemExit("--arch transformer requires --obs ego")

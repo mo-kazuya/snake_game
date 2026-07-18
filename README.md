@@ -61,10 +61,14 @@
   10×10で3M→20×20で1.5Mのカリキュラム学習後、**8〜40の複数サイズ混合で計5M
   ステップの追加ファインチューニング済み**。8×8〜40×40の全サイズで実用的な強さです
   （20×20で平均約59エサ、30×30で約71エサ、40×40で約75エサ）。
-- **ego/Transformer** … 同じego観測を **ViT型Transformer**（2×2パッチ+CLSトークン、
-  `gym_snake.policies.EgoTransformer`）で処理する比較・教材用モデル。同一レシピの
-  公平な比較で**サンプル効率・実行速度ともCNNに大きく劣る**結果でした（小盤面で平均
-  10〜17エサ、大盤面は苦手）。詳細な分析は `examples/TRAINING_RESULTS.md` を参照。
+- **ego/Transformer** … 同じego観測を **ViT型Transformer**（セル単位パッチ+CLSトークン、
+  `gym_snake.policies.EgoTransformer`、d_model=128・4層）で処理するモデル。
+  **探索AIを教師とする模倣学習（BC）で事前学習し、PPOでファインチューニング**する
+  2段階レシピ（`examples/train_transformer_v2.py`）で学習した現在の**リポジトリ最強モデル**
+  です（同一プロトコル比較で全6サイズがego/CNNを上回り、平均67.5エサ。20×20で約73、
+  40×40で約95）。PPO単独で学習したv1はCNNに大きく劣っており（平均8.9）、
+  「Transformerの弱い帰納バイアスを教師データで補う」効果の実証になっています。
+  詳細な分析は `examples/TRAINING_RESULTS.md` を参照。
 - **依存の無い環境でも安全**: `stable-baselines3`/`torch`（CNN/Transformerは加えて `gym_snake`）が未インストール、
   またはモデルファイルが無い場合は自動的に探索AIへフォールバックし、フロント側では該当オプションが
   選択不可になります。
