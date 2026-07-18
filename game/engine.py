@@ -1,9 +1,16 @@
 """Snake game engine.
 
 Holds the authoritative game state and the rules for advancing it one step.
-The engine is deliberately UI-agnostic: it only knows about a grid, a snake,
-food, and a score. The AI (see ``ai.py``) decides *which* direction to move;
-the engine applies that move and reports what happened.
+The engine is deliberately UI-agnostic: it only knows about a grid, one or
+more snakes, food, and scores. The AI (see ``ai.py``) decides *which*
+direction each snake moves; the engine applies those moves simultaneously
+and reports what happened.
+
+Two snakes share one board and one food item -- whichever reaches it first
+eats it. A snake dies from a wall collision, running into any snake's body
+(its own or the other's), or a head-on collision with the other snake's new
+head. A dead snake's body is removed from the board so it stops blocking the
+survivor. The game ends once every snake is dead.
 """
 
 from __future__ import annotations
@@ -21,45 +28,86 @@ DIRECTIONS = {
 
 
 @dataclass
-class GameState:
-    """Authoritative state for a single game of Snake."""
+class Snake:
+    """One snake's state within a (possibly multi-snake) game."""
 
-    grid: int = 20
-    snake: list[tuple[int, int]] = field(default_factory=list)
+    body: list[tuple[int, int]] = field(default_factory=list)
     direction: str = "right"
-    food: tuple[int, int] = (0, 0)
+    strategy: str = "search"
     score: int = 0
-    steps: int = 0
-    game_over: bool = False
     steps_since_food: int = 0
-    # True if the game ended because too many steps passed without eating,
-    # rather than a collision. A memoryless AI (see ai.py) can settle into
-    # repeating the same loop forever with no food in sight; this stall
-    # timeout guarantees the game always ends regardless of how the AI
-    # behaves. Mirrors gym_snake's SnakeEnv truncation (max_steps_without_food).
+    alive: bool = True
+    # True if this snake died from its own stall timeout rather than a
+    # collision -- see GameState.step() for why this backstop exists.
     stalled: bool = False
 
+    def _is_opposite(self, direction: str) -> bool:
+        dx, dy = DIRECTIONS[direction]
+        cx, cy = DIRECTIONS[self.direction]
+        return (dx, dy) == (-cx, -cy)
+
+    def to_dict(self) -> dict:
+        return {
+            "snake": [list(cell) for cell in self.body],
+            "direction": self.direction,
+            "strategy": self.strategy,
+            "score": self.score,
+            "steps_since_food": self.steps_since_food,
+            "length": len(self.body),
+            "alive": self.alive,
+            "stalled": self.stalled,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Snake":
+        return cls(
+            body=[tuple(cell) for cell in data["snake"]],
+            direction=data["direction"],
+            strategy=data.get("strategy", "search"),
+            score=data["score"],
+            steps_since_food=data.get("steps_since_food", 0),
+            alive=data.get("alive", True),
+            stalled=data.get("stalled", False),
+        )
+
+
+@dataclass
+class GameState:
+    """Authoritative state for a game of Snake, shared by every snake in it."""
+
+    grid: int = 20
+    snakes: list[Snake] = field(default_factory=list)
+    food: tuple[int, int] | None = (0, 0)
+    steps: int = 0
+    game_over: bool = False
+
     def __post_init__(self) -> None:
-        if not self.snake:
-            self.reset()
+        if not self.snakes:
+            self.reset(["search", "search"])
 
     # -- lifecycle ---------------------------------------------------------
 
-    def reset(self) -> None:
+    def reset(self, strategies: list[str]) -> None:
+        """Start a new game with one snake per entry in ``strategies``."""
         mid = self.grid // 2
-        # Start length 3, heading right, comfortably inside the board.
-        self.snake = [(mid, mid), (mid - 1, mid), (mid - 2, mid)]
-        self.direction = "right"
-        self.score = 0
+        self.snakes = []
+        for i, strategy in enumerate(strategies):
+            # Snakes start on separate rows, facing away from each other, so
+            # they don't spawn overlapping or immediately head-to-head.
+            row = mid - 2 if i % 2 == 0 else mid + 2
+            heading = "right" if i % 2 == 0 else "left"
+            dx = -1 if heading == "right" else 1
+            body = [(mid + dx * j, row) for j in range(3)]
+            self.snakes.append(
+                Snake(body=body, direction=heading, strategy=strategy)
+            )
         self.steps = 0
-        self.steps_since_food = 0
         self.game_over = False
-        self.stalled = False
         self.place_food()
 
     def place_food(self) -> None:
-        """Put food on a random empty cell (or mark a win if the board is full)."""
-        occupied = set(self.snake)
+        """Put food on a random cell free of every snake (or end the game if full)."""
+        occupied = {cell for s in self.snakes for cell in s.body}
         free = [
             (x, y)
             for x in range(self.grid)
@@ -67,83 +115,129 @@ class GameState:
             if (x, y) not in occupied
         ]
         if not free:
-            # Board is completely filled: the snake has "won".
+            # Board is completely filled: the snakes have "won".
+            self.food = None
             self.game_over = True
             return
         self.food = random.choice(free)
 
-    # -- stepping ----------------------------------------------------------
+    # -- stepping ------------------------------------------------------------
 
-    def step(self, direction: str) -> dict:
-        """Advance one tick in ``direction``. Returns a small event dict."""
+    def step(self, directions: list[str]) -> list[dict]:
+        """Advance one tick. ``directions`` has one entry per snake (dead or
+        already-finished snakes ignore theirs). Returns one event dict per
+        snake, in the same order as ``self.snakes``."""
         if self.game_over:
-            return {"moved": False, "ate": False, "dead": True}
+            return [{"moved": False, "ate": False, "dead": True} for _ in self.snakes]
 
-        # Ignore a 180-degree reversal; keep the current heading instead.
-        if not self._is_opposite(direction):
-            self.direction = direction
+        living = [i for i, s in enumerate(self.snakes) if s.alive]
 
-        dx, dy = DIRECTIONS[self.direction]
-        hx, hy = self.snake[0]
-        new_head = (hx + dx, hy + dy)
+        # 1. Turn (ignoring 180-degree reversals) and compute candidate heads.
+        new_heads: dict[int, tuple[int, int]] = {}
+        for i in living:
+            s = self.snakes[i]
+            if not s._is_opposite(directions[i]):
+                s.direction = directions[i]
+            dx, dy = DIRECTIONS[s.direction]
+            hx, hy = s.body[0]
+            new_heads[i] = (hx + dx, hy + dy)
 
-        # Wall collision.
-        if not (0 <= new_head[0] < self.grid and 0 <= new_head[1] < self.grid):
-            self.game_over = True
-            return {"moved": False, "ate": False, "dead": True}
+        dead_this_tick: set[int] = set()
 
-        ate = new_head == self.food
-        # Body collision. The tail cell is free *unless* we grow this tick.
-        body = self.snake if ate else self.snake[:-1]
-        if new_head in body:
-            self.game_over = True
-            return {"moved": False, "ate": False, "dead": True}
+        # 2. Wall collisions.
+        for i, head in new_heads.items():
+            if not (0 <= head[0] < self.grid and 0 <= head[1] < self.grid):
+                dead_this_tick.add(i)
 
-        self.snake.insert(0, new_head)
+        # 3. Head-on collisions: two survivors moving onto the same cell
+        # crash into each other and both die (no one eats there either).
+        for i in living:
+            if i in dead_this_tick:
+                continue
+            for j in living:
+                if j <= i or j in dead_this_tick:
+                    continue
+                if new_heads[i] == new_heads[j]:
+                    dead_this_tick.add(i)
+                    dead_this_tick.add(j)
+
+        # 4. Food: whichever surviving candidate's head lands on it (at most
+        # one, since a shared landing cell was just resolved as a head-on
+        # collision above).
+        eaten_by = None
+        for i in living:
+            if i not in dead_this_tick and new_heads[i] == self.food:
+                eaten_by = i
+                break
+
+        # 5. Body collisions: a snake dies if its new head lands on any
+        # snake's body (its own or another's), tail excluded unless that
+        # snake is growing this tick (tail is about to vacate otherwise).
+        blocked_by: dict[int, set[tuple[int, int]]] = {}
+        for i in living:
+            if i in dead_this_tick:
+                continue
+            s = self.snakes[i]
+            blocked_by[i] = set(s.body if i == eaten_by else s.body[:-1])
+
+        for i in living:
+            if i in dead_this_tick:
+                continue
+            head = new_heads[i]
+            if any(head in blocked for blocked in blocked_by.values()):
+                dead_this_tick.add(i)
+
+        # 6. Apply moves for everyone still alive.
+        events = [{"moved": False, "ate": False, "dead": True} for _ in self.snakes]
+        for i in living:
+            s = self.snakes[i]
+            if i in dead_this_tick:
+                s.alive = False
+                s.body = []
+                events[i] = {"moved": False, "ate": False, "dead": True}
+                continue
+
+            ate = i == eaten_by
+            s.body.insert(0, new_heads[i])
+            if ate:
+                s.score += 10
+                s.steps_since_food = 0
+            else:
+                s.body.pop()
+                s.steps_since_food += 1
+                if s.steps_since_food >= self.grid * self.grid:
+                    s.alive = False
+                    s.stalled = True
+                    s.body = []
+                    events[i] = {"moved": False, "ate": False, "dead": True}
+                    continue
+
+            events[i] = {"moved": True, "ate": ate, "dead": False}
+
         self.steps += 1
-        if ate:
-            self.score += 10
-            self.steps_since_food = 0
-            self.place_food()
-        else:
-            self.snake.pop()
-            self.steps_since_food += 1
-            if self.steps_since_food >= self.grid * self.grid:
-                self.game_over = True
-                self.stalled = True
+        if eaten_by is not None:
+            self.place_food()  # may itself set game_over if the board is now full
 
-        return {"moved": True, "ate": ate, "dead": self.game_over}
+        if all(not s.alive for s in self.snakes):
+            self.game_over = True
 
-    def _is_opposite(self, direction: str) -> bool:
-        dx, dy = DIRECTIONS[direction]
-        cx, cy = DIRECTIONS[self.direction]
-        return (dx, dy) == (-cx, -cy)
+        return events
 
-    # -- serialization -----------------------------------------------------
+    # -- serialization -------------------------------------------------------
 
     def to_dict(self) -> dict:
         return {
             "grid": self.grid,
-            "snake": [list(cell) for cell in self.snake],
-            "direction": self.direction,
-            "food": list(self.food),
-            "score": self.score,
+            "snakes": [s.to_dict() for s in self.snakes],
+            "food": list(self.food) if self.food is not None else None,
             "steps": self.steps,
-            "steps_since_food": self.steps_since_food,
-            "length": len(self.snake),
             "game_over": self.game_over,
-            "stalled": self.stalled,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "GameState":
-        state = cls(grid=data["grid"])
-        state.snake = [tuple(cell) for cell in data["snake"]]
-        state.direction = data["direction"]
-        state.food = tuple(data["food"])
-        state.score = data["score"]
+        state = cls(grid=data["grid"], snakes=[Snake.from_dict(d) for d in data["snakes"]])
+        state.food = tuple(data["food"]) if data.get("food") is not None else None
         state.steps = data.get("steps", 0)
-        state.steps_since_food = data.get("steps_since_food", 0)
         state.game_over = data["game_over"]
-        state.stalled = data.get("stalled", False)
         return state

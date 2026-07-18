@@ -42,15 +42,29 @@ class GameConsumer(WebsocketConsumer):
             self._send_error_and_close()
             return
 
-        strategy = data.get("strategy", "search")
-        direction, used = ai.choose(state, strategy)
-        event = state.step(direction)
+        requested = data.get("strategies") or []
+        directions = []
+        used_strategies = []
+        for i, snake in enumerate(state.snakes):
+            if not snake.alive:
+                # Ignored by GameState.step() for a dead snake; any legal
+                # direction name is fine as a placeholder.
+                directions.append(snake.direction)
+                used_strategies.append(snake.strategy)
+                continue
+            strategy = requested[i] if i < len(requested) else snake.strategy
+            snake.strategy = strategy  # persist the current selection
+            direction, used = ai.choose(state, i, strategy)
+            directions.append(direction)
+            used_strategies.append(used)
+
+        events = state.step(directions)
         self.send(text_data=json.dumps(
             {
                 "game_id": self.game_id,
-                "direction": direction,
-                "strategy": used,
-                "event": event,
+                "directions": directions,
+                "strategies": used_strategies,
+                "events": events,
                 "state": state.to_dict(),
             }
         ))

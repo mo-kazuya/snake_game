@@ -12,128 +12,184 @@ from django.test import TestCase
 from snakeai.asgi import application
 
 from . import ai, rl_agent
-from .engine import GameState
+from .engine import GameState, Snake
 
 
 class EngineTests(TestCase):
     def test_initial_state(self):
         s = GameState(grid=20)
-        self.assertEqual(len(s.snake), 3)
-        self.assertEqual(s.direction, "right")
+        self.assertEqual(len(s.snakes), 2)
+        for snake in s.snakes:
+            self.assertEqual(len(snake.body), 3)
+            self.assertTrue(snake.alive)
         self.assertFalse(s.game_over)
-        # Food is never placed on the snake.
-        self.assertNotIn(s.food, set(s.snake))
+        # Food is never placed on either snake, and the snakes don't overlap.
+        occupied = {cell for snake in s.snakes for cell in snake.body}
+        self.assertEqual(len(occupied), 6)
+        self.assertNotIn(s.food, occupied)
 
     def test_move_advances_head(self):
-        s = GameState(grid=20)
-        head = s.snake[0]
-        s.step("right")
-        self.assertEqual(s.snake[0], (head[0] + 1, head[1]))
-        self.assertEqual(len(s.snake), 3)  # no growth without food
+        s = GameState(grid=20, snakes=[Snake(body=[(10, 10), (9, 10), (8, 10)], direction="right")])
+        head = s.snakes[0].body[0]
+        s.step(["right"])
+        self.assertEqual(s.snakes[0].body[0], (head[0] + 1, head[1]))
+        self.assertEqual(len(s.snakes[0].body), 3)  # no growth without food
 
-    def test_wall_collision_ends_game(self):
-        s = GameState(grid=10)
-        s.snake = [(9, 5), (8, 5), (7, 5)]
-        s.direction = "right"
-        event = s.step("right")
-        self.assertTrue(event["dead"])
+    def test_wall_collision_kills_snake(self):
+        s = GameState(grid=10, snakes=[Snake(body=[(9, 5), (8, 5), (7, 5)], direction="right")])
+        events = s.step(["right"])
+        self.assertTrue(events[0]["dead"])
+        self.assertFalse(s.snakes[0].alive)
+        # The only snake died, so the game is over too.
         self.assertTrue(s.game_over)
 
     def test_reversal_is_ignored(self):
-        s = GameState(grid=20)
-        s.direction = "right"
-        s.step("left")  # 180-degree turn should be ignored
-        self.assertEqual(s.direction, "right")
+        s = GameState(grid=20, snakes=[Snake(body=[(10, 10), (9, 10), (8, 10)], direction="right")])
+        s.step(["left"])  # 180-degree turn should be ignored
+        self.assertEqual(s.snakes[0].direction, "right")
 
     def test_eating_grows_and_scores(self):
-        s = GameState(grid=20)
-        s.snake = [(5, 5), (4, 5), (3, 5)]
-        s.direction = "right"
+        s = GameState(grid=20, snakes=[Snake(body=[(5, 5), (4, 5), (3, 5)], direction="right")])
         s.food = (6, 5)
-        event = s.step("right")
-        self.assertTrue(event["ate"])
-        self.assertEqual(s.score, 10)
-        self.assertEqual(len(s.snake), 4)
+        events = s.step(["right"])
+        self.assertTrue(events[0]["ate"])
+        self.assertEqual(s.snakes[0].score, 10)
+        self.assertEqual(len(s.snakes[0].body), 4)
 
     def test_serialization_roundtrip(self):
         s = GameState(grid=15)
-        s.step("right")
+        s.step(["right", "left"])
         restored = GameState.from_dict(s.to_dict())
-        self.assertEqual(restored.snake, s.snake)
         self.assertEqual(restored.food, s.food)
-        self.assertEqual(restored.score, s.score)
-        self.assertEqual(restored.steps_since_food, s.steps_since_food)
-        self.assertEqual(restored.stalled, s.stalled)
+        self.assertEqual(restored.game_over, s.game_over)
+        self.assertEqual(len(restored.snakes), len(s.snakes))
+        for r, o in zip(restored.snakes, s.snakes):
+            self.assertEqual(r.body, o.body)
+            self.assertEqual(r.direction, o.direction)
+            self.assertEqual(r.strategy, o.strategy)
+            self.assertEqual(r.score, o.score)
+            self.assertEqual(r.steps_since_food, o.steps_since_food)
+            self.assertEqual(r.alive, o.alive)
+            self.assertEqual(r.stalled, o.stalled)
 
-    def test_stall_without_food_ends_game(self):
+    def test_stall_without_food_ends_snake(self):
         """A move that doesn't reach food, once too many have piled up,
-        must end the game even though it's perfectly legal (see ai.py's
+        must end the snake even though it's perfectly legal (see ai.py's
         anti-loop tiebreaker for why this backstop exists)."""
-        s = GameState(grid=10)
-        s.snake = [(5, 5), (5, 6), (5, 7)]
-        s.direction = "up"
+        s = GameState(grid=10, snakes=[Snake(body=[(5, 5), (5, 6), (5, 7)], direction="up")])
         s.food = (0, 0)
-        s.steps_since_food = s.grid * s.grid - 1  # one step from the limit
-        event = s.step("left")
-        self.assertTrue(event["moved"])
-        self.assertFalse(event["ate"])
-        self.assertTrue(event["dead"])
+        s.snakes[0].steps_since_food = s.grid * s.grid - 1  # one step from the limit
+        events = s.step(["left"])
+        self.assertTrue(events[0]["dead"])
+        self.assertTrue(s.snakes[0].stalled)
         self.assertTrue(s.game_over)
-        self.assertTrue(s.stalled)
 
     def test_stall_flag_absent_on_normal_death(self):
-        s = GameState(grid=10)
-        s.snake = [(9, 5), (8, 5), (7, 5)]
-        s.direction = "right"
-        s.step("right")  # wall collision
-        self.assertTrue(s.game_over)
-        self.assertFalse(s.stalled)
+        s = GameState(grid=10, snakes=[Snake(body=[(9, 5), (8, 5), (7, 5)], direction="right")])
+        s.step(["right"])  # wall collision
+        self.assertFalse(s.snakes[0].stalled)
 
     def test_eating_resets_stall_counter(self):
-        s = GameState(grid=10)
-        s.snake = [(5, 5), (4, 5), (3, 5)]
-        s.direction = "right"
+        s = GameState(grid=10, snakes=[Snake(body=[(5, 5), (4, 5), (3, 5)], direction="right")])
         s.food = (6, 5)
-        s.steps_since_food = 50
-        event = s.step("right")
-        self.assertTrue(event["ate"])
-        self.assertEqual(s.steps_since_food, 0)
+        s.snakes[0].steps_since_food = 50
+        events = s.step(["right"])
+        self.assertTrue(events[0]["ate"])
+        self.assertEqual(s.snakes[0].steps_since_food, 0)
+
+    # -- two-snake interactions ---------------------------------------------
+
+    def test_two_snakes_share_food_first_to_arrive_eats(self):
+        s = GameState(grid=20, snakes=[
+            Snake(body=[(5, 5), (4, 5), (3, 5)], direction="right"),
+            Snake(body=[(15, 15), (16, 15), (17, 15)], direction="left"),
+        ])
+        s.food = (6, 5)  # only snake 0 reaches it this tick
+        events = s.step(["right", "left"])
+        self.assertTrue(events[0]["ate"])
+        self.assertFalse(events[1]["ate"])
+        self.assertEqual(s.snakes[0].score, 10)
+        self.assertEqual(s.snakes[1].score, 0)
+        self.assertIsNotNone(s.food)
+        self.assertNotEqual(s.food, (6, 5))  # a new food was placed elsewhere
+
+    def test_head_on_collision_kills_both(self):
+        s = GameState(grid=20, snakes=[
+            Snake(body=[(5, 5), (4, 5), (3, 5)], direction="right"),
+            Snake(body=[(7, 5), (8, 5), (9, 5)], direction="left"),
+        ])
+        s.food = (0, 0)  # irrelevant, both crash into cell (6, 5) instead
+        events = s.step(["right", "left"])
+        self.assertTrue(events[0]["dead"])
+        self.assertTrue(events[1]["dead"])
+        self.assertFalse(s.snakes[0].alive)
+        self.assertFalse(s.snakes[1].alive)
+        self.assertTrue(s.game_over)
+
+    def test_crashing_into_other_snakes_body_dies(self):
+        s = GameState(grid=20, snakes=[
+            Snake(body=[(5, 5), (4, 5), (3, 5)], direction="right"),
+            Snake(body=[(6, 6), (6, 5), (6, 4)], direction="left"),
+        ])
+        s.food = (0, 0)
+        events = s.step(["right", "left"])
+        self.assertTrue(events[0]["dead"])   # ran into snake 1's body at (6, 5)
+        self.assertFalse(s.snakes[0].alive)
+        self.assertFalse(events[1]["dead"])  # snake 1 moved away safely
+        self.assertTrue(s.snakes[1].alive)
+        # One snake is still alive, so the game continues.
+        self.assertFalse(s.game_over)
+
+    def test_dead_snakes_body_is_cleared(self):
+        s = GameState(grid=10, snakes=[
+            Snake(body=[(9, 5), (8, 5), (7, 5)], direction="right"),
+            Snake(body=[(0, 5), (0, 6), (0, 7)], direction="up"),
+        ])
+        s.food = (5, 9)  # away from both snakes' paths
+        s.step(["right", "up"])  # snake 0 hits the wall; snake 1 moves safely
+        self.assertEqual(s.snakes[0].body, [])
+        self.assertTrue(s.snakes[1].alive)
 
 
 class AITests(TestCase):
     def test_never_reverses(self):
-        s = GameState(grid=20)
-        s.direction = "right"
-        d = ai.choose_direction(s)
+        s = GameState(grid=20, snakes=[Snake(body=[(10, 10), (9, 10), (8, 10)], direction="right")])
+        d = ai.choose_direction(s, 0)
         self.assertNotEqual(d, "left")
 
     def test_moves_toward_food(self):
-        s = GameState(grid=20)
-        s.snake = [(5, 5), (4, 5), (3, 5)]
-        s.direction = "right"
+        s = GameState(grid=20, snakes=[Snake(body=[(5, 5), (4, 5), (3, 5)], direction="right")])
         s.food = (5, 8)  # directly below
         # Straight to food is right/down; the AI should not pick a wasteful up.
-        d = ai.choose_direction(s)
+        d = ai.choose_direction(s, 0)
         self.assertIn(d, ("down", "right"))
 
     def test_avoids_immediate_death(self):
         # Snake hugging the right wall heading right -> must not step into wall.
-        s = GameState(grid=8)
-        s.snake = [(7, 3), (6, 3), (5, 3)]
-        s.direction = "right"
+        s = GameState(grid=8, snakes=[Snake(body=[(7, 3), (6, 3), (5, 3)], direction="right")])
         s.food = (7, 0)
-        d = ai.choose_direction(s)
+        d = ai.choose_direction(s, 0)
         self.assertNotEqual(d, "right")
+
+    def test_avoids_opponent_body(self):
+        """A snake must treat the other living snake's body as an obstacle too."""
+        s = GameState(grid=20, snakes=[
+            Snake(body=[(5, 5), (4, 5), (3, 5)], direction="right"),
+            Snake(body=[(6, 5), (6, 6), (6, 7)], direction="down"),
+        ])
+        s.food = (10, 10)
+        d = ai.choose_direction(s, 0)
+        self.assertNotEqual(d, "right")  # (6, 5) belongs to the other snake
 
     def test_ai_survives_many_steps(self):
         """A full AI-driven game should eat several foods without dying early."""
-        s = GameState(grid=12)
+        s = GameState(grid=12, snakes=[Snake(body=[(6, 6), (5, 6), (4, 6)], direction="right")])
         for _ in range(400):
             if s.game_over:
                 break
-            s.step(ai.choose_direction(s))
+            s.step([ai.choose_direction(s, 0)])
         # The safe-seeking AI should reach a decent score before any death.
-        self.assertGreaterEqual(s.score, 30)
+        self.assertGreaterEqual(s.snakes[0].score, 30)
 
     def test_survival_tiebreak_avoids_recently_visited_cell(self):
         """Ties in survival mode should be broken by recency, not always the
@@ -141,48 +197,47 @@ class AITests(TestCase):
         the exact same loop forever."""
         grid = 21
         mid = grid // 2
-        s = GameState(grid=grid)
-        s.snake = [(mid, mid), (mid, mid + 1), (mid, mid + 2)]  # heading "up"
-        s.direction = "up"
+        s = GameState(grid=grid, snakes=[
+            Snake(body=[(mid, mid), (mid, mid + 1), (mid, mid + 2)], direction="up")
+        ])
         s.food = (0, 0)  # irrelevant here; _bfs is patched out below
 
         # Force branch 2 (survival) regardless of food placement: with no
         # safe path ever found, left/right/up are an exact tie by symmetry
         # on an open board.
         with mock.patch.object(ai, "_bfs", return_value=None):
-            baseline = ai.choose_direction(s)
+            baseline = ai.choose_direction(s, 0)
 
         landing = {
             "up": (mid, mid - 1),
             "left": (mid - 1, mid),
             "right": (mid + 1, mid),
         }[baseline]
-        s._ai_recent_heads = deque([landing] * 10, maxlen=64)
+        s._ai_recent_heads = {0: deque([landing] * 10, maxlen=64)}
 
         with mock.patch.object(ai, "_bfs", return_value=None):
-            biased = ai.choose_direction(s)
+            biased = ai.choose_direction(s, 0)
 
         self.assertNotEqual(biased, baseline)
 
 
 class RLAgentTests(TestCase):
     def _mirror(self, env):
-        """Copy a gym SnakeEnv's live state into a Django GameState."""
-        s = GameState(grid=env.grid_size)
-        s.snake = list(env.snake)
-        s.food = env.food
-        s.direction = rl_agent._DIR_NAMES[env.heading_idx]
-        return s
+        """Copy a gym SnakeEnv's live state into a single-snake Django GameState."""
+        return GameState(grid=env.grid_size, snakes=[Snake(
+            body=list(env.snake),
+            direction=rl_agent._DIR_NAMES[env.heading_idx],
+        )], food=env.food)
 
     def test_feature_observation_shape_and_range(self):
-        s = GameState(grid=20)
-        obs = rl_agent.build_observation(s, "features")
+        s = GameState(grid=20, snakes=[Snake(body=[(10, 10), (9, 10), (8, 10)], direction="right")])
+        obs = rl_agent.build_observation(s, "features", 0)
         self.assertEqual(obs.shape, (11,))
         self.assertTrue((obs >= 0).all() and (obs <= 1).all())
 
     def test_grid_observation_shape(self):
-        s = GameState(grid=10)
-        obs = rl_agent.build_observation(s, "grid")
+        s = GameState(grid=10, snakes=[Snake(body=[(5, 5), (4, 5), (3, 5)], direction="right")])
+        obs = rl_agent.build_observation(s, "grid", 0)
         self.assertEqual(obs.shape, (3, 10, 10))
 
     def test_feature_observation_matches_gym_encoding(self):
@@ -196,7 +251,7 @@ class RLAgentTests(TestCase):
         env.reset(seed=0)
         s = self._mirror(env)
         self.assertTrue(
-            np.array_equal(rl_agent.build_observation(s, "features"), env._feature_obs())
+            np.array_equal(rl_agent.build_observation(s, "features", 0), env._feature_obs())
         )
 
     def test_grid_observation_matches_gym_encoding(self):
@@ -210,7 +265,7 @@ class RLAgentTests(TestCase):
         env.reset(seed=1)
         s = self._mirror(env)
         self.assertTrue(
-            np.array_equal(rl_agent.build_observation(s, "grid"), env._grid_obs())
+            np.array_equal(rl_agent.build_observation(s, "grid", 0), env._grid_obs())
         )
 
     def test_ego_observation_matches_gym_encoding(self):
@@ -226,25 +281,35 @@ class RLAgentTests(TestCase):
             env.reset(seed=2)
             s = self._mirror(env)
             self.assertTrue(
-                np.array_equal(rl_agent.build_observation(s, "ego"), env._get_obs())
+                np.array_equal(rl_agent.build_observation(s, "ego", 0), env._get_obs())
             )
 
+    def test_opponent_body_folded_into_feature_danger_sensors(self):
+        s = GameState(grid=20, snakes=[
+            Snake(body=[(5, 5), (4, 5), (3, 5)], direction="right"),
+            Snake(body=[(6, 5), (6, 6), (6, 7)], direction="down"),
+        ])
+        s.food = (10, 10)
+        obs = rl_agent.build_observation(s, "features", 0)
+        self.assertEqual(obs[0], 1.0)  # danger straight: (6, 5) is snake 1's head
+
     def test_required_grid(self):
-        # Both RL models are board-size independent.
+        # All RL models are board-size independent.
         self.assertIsNone(rl_agent.required_grid("rl"))
         self.assertIsNone(rl_agent.required_grid("rl_cnn"))
+        self.assertIsNone(rl_agent.required_grid("rl_trf"))
 
     def test_choose_falls_back_to_search_when_unknown(self):
         s = GameState(grid=20)
-        direction, used = ai.choose(s, strategy="does-not-exist")
+        direction, used = ai.choose(s, 0, strategy="does-not-exist")
         self.assertEqual(used, "search")
         self.assertIn(direction, ("up", "down", "left", "right"))
 
     def test_rl_returns_valid_direction_when_available(self):
         if not rl_agent.is_available("rl"):
             self.skipTest("features model / stable-baselines3 not available")
-        s = GameState(grid=20)
-        direction, used = ai.choose(s, strategy="rl")
+        s = GameState(grid=20, snakes=[Snake(body=[(10, 10), (9, 10), (8, 10)], direction="right")])
+        direction, used = ai.choose(s, 0, strategy="rl")
         self.assertEqual(used, "rl")
         self.assertNotEqual(direction, "left")  # never reverse (starts right)
 
@@ -252,8 +317,8 @@ class RLAgentTests(TestCase):
         if not rl_agent.is_available("rl_cnn"):
             self.skipTest("ego/CNN model not available")
         for grid in (10, 20):
-            s = GameState(grid=grid)
-            direction, used = ai.choose(s, strategy="rl_cnn")
+            s = GameState(grid=grid, snakes=[Snake(body=[(6, 6), (5, 6), (4, 6)], direction="right")])
+            direction, used = ai.choose(s, 0, strategy="rl_cnn")
             self.assertEqual(used, "rl_cnn", f"grid={grid}")
             self.assertIn(direction, ("up", "down", "right"))  # never reverse
 
@@ -261,10 +326,23 @@ class RLAgentTests(TestCase):
         if not rl_agent.is_available("rl_trf"):
             self.skipTest("ego/Transformer model not available")
         for grid in (10, 20):
-            s = GameState(grid=grid)
-            direction, used = ai.choose(s, strategy="rl_trf")
+            s = GameState(grid=grid, snakes=[Snake(body=[(6, 6), (5, 6), (4, 6)], direction="right")])
+            direction, used = ai.choose(s, 0, strategy="rl_trf")
             self.assertEqual(used, "rl_trf", f"grid={grid}")
             self.assertIn(direction, ("up", "down", "right"))  # never reverse
+
+    def test_rl_works_with_a_second_snake_on_board(self):
+        """RL strategies must not crash just because a second snake exists,
+        even though they can't perceive it the way the search AI does."""
+        if not rl_agent.is_available("rl_cnn"):
+            self.skipTest("ego/CNN model not available")
+        s = GameState(grid=20, snakes=[
+            Snake(body=[(5, 5), (4, 5), (3, 5)], direction="right"),
+            Snake(body=[(15, 15), (14, 15), (13, 15)], direction="right"),
+        ])
+        direction, used = ai.choose(s, 0, strategy="rl_cnn")
+        self.assertEqual(used, "rl_cnn")
+        self.assertIn(direction, ("up", "down", "right"))
 
 
 class ViewTests(TestCase):
@@ -277,6 +355,7 @@ class ViewTests(TestCase):
         data = res.json()
         self.assertIn("game_id", data)
         self.assertEqual(data["state"]["grid"], 20)
+        self.assertEqual(len(data["state"]["snakes"]), 2)
 
     def test_new_game_accepts_various_grid_sizes(self):
         for grid in (10, 14, 30, 40):
@@ -286,9 +365,10 @@ class ViewTests(TestCase):
             )
             data = res.json()
             self.assertEqual(data["state"]["grid"], grid)
-            # The snake starts mid-board with room to move on every size.
-            head = data["state"]["snake"][0]
-            self.assertTrue(0 < head[0] < grid and 0 < head[1] < grid)
+            # Both snakes start mid-board with room to move on every size.
+            for snake in data["state"]["snakes"]:
+                head = snake["snake"][0]
+                self.assertTrue(0 < head[0] < grid and 0 < head[1] < grid)
 
     def test_new_game_clamps_grid(self):
         for sent, expected in ((2, 8), (100, 50)):
@@ -306,6 +386,34 @@ class ViewTests(TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()["state"]["grid"], 20)
 
+    def test_new_game_accepts_per_snake_strategies(self):
+        res = self.client.post(
+            "/api/new/", data=json.dumps({"strategies": ["search", "search"]}),
+            content_type="application/json",
+        )
+        data = res.json()["state"]
+        self.assertEqual(data["snakes"][0]["strategy"], "search")
+        self.assertEqual(data["snakes"][1]["strategy"], "search")
+
+    def test_new_game_pads_missing_strategies(self):
+        res = self.client.post(
+            "/api/new/", data=json.dumps({"strategies": ["search"]}),
+            content_type="application/json",
+        )
+        data = res.json()["state"]
+        self.assertEqual(len(data["snakes"]), 2)
+        self.assertEqual(data["snakes"][1]["strategy"], "search")
+
+    def test_new_game_ignores_malformed_strategies(self):
+        res = self.client.post(
+            "/api/new/", data=json.dumps({"strategies": "not-a-list"}),
+            content_type="application/json",
+        )
+        self.assertEqual(res.status_code, 200)
+        data = res.json()["state"]
+        self.assertEqual(len(data["snakes"]), 2)
+        self.assertEqual(data["snakes"][0]["strategy"], "search")
+
     def test_index_renders(self):
         res = self.client.get("/")
         self.assertEqual(res.status_code, 200)
@@ -322,11 +430,14 @@ class GameConsumerTests(TestCase):
         connected, _ = await communicator.connect()
         self.assertTrue(connected)
 
-        await communicator.send_json_to({"strategy": "search"})
+        await communicator.send_json_to({"strategies": ["search", "search"]})
         data = await communicator.receive_json_from()
-        self.assertIn(data["direction"], ("up", "down", "left", "right"))
-        self.assertEqual(data["strategy"], "search")
-        self.assertIn("state", data)
+        self.assertEqual(len(data["directions"]), 2)
+        self.assertEqual(data["strategies"], ["search", "search"])
+        self.assertEqual(len(data["events"]), 2)
+        for d in data["directions"]:
+            self.assertIn(d, ("up", "down", "left", "right"))
+        self.assertEqual(len(data["state"]["snakes"]), 2)
 
         await communicator.disconnect()
 
@@ -336,13 +447,32 @@ class GameConsumerTests(TestCase):
         communicator = WebsocketCommunicator(application, f"/ws/game/{gid}/")
         await communicator.connect()
 
-        steps_seen = 0
+        # Two independent search AIs can legitimately end their duel early
+        # (a collision), so this only checks that five request/response
+        # round-trips over one connection work and steps never go backwards
+        # -- not that the game necessarily lasts all five ticks.
+        steps_history = []
         for _ in range(5):
-            await communicator.send_json_to({"strategy": "search"})
+            await communicator.send_json_to({"strategies": ["search", "search"]})
             data = await communicator.receive_json_from()
-            steps_seen = data["state"]["steps"]
+            steps_history.append(data["state"]["steps"])
 
-        self.assertEqual(steps_seen, 5)
+        self.assertEqual(len(steps_history), 5)
+        self.assertEqual(steps_history, sorted(steps_history))
+        self.assertGreaterEqual(steps_history[0], 1)
+        await communicator.disconnect()
+
+    async def test_different_ai_per_snake_falls_back_independently(self):
+        new = self.client.post("/api/new/", content_type="application/json").json()
+        gid = new["game_id"]
+        communicator = WebsocketCommunicator(application, f"/ws/game/{gid}/")
+        await communicator.connect()
+
+        await communicator.send_json_to({"strategies": ["search", "does-not-exist"]})
+        data = await communicator.receive_json_from()
+        # Snake 0 keeps its real strategy; snake 1's unknown one falls back.
+        self.assertEqual(data["strategies"], ["search", "search"])
+
         await communicator.disconnect()
 
     async def test_unknown_game_id_sends_error_and_closes(self):

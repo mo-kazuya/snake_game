@@ -70,12 +70,19 @@ def ego_observation(
     grid_size: int,
     heading_idx: int,
     window: int = WINDOW,
+    opponent_cells: list[tuple[int, int]] | None = None,
 ) -> np.ndarray:
     """Build the ``(5, window, window)`` egocentric observation.
 
     ``snake`` is head-first ``(x, y)`` cells, ``heading_idx`` uses the SnakeEnv
     convention (0=up, 1=right, 2=down, 3=left). ``food`` may be ``None`` (full
     board), leaving the food channels empty.
+
+    ``opponent_cells``, if given, marks extra cells (in practice another
+    snake's body, in a multi-snake game) as deadly/body in exactly the same
+    way as this snake's own body. ``None`` (the default) reproduces the
+    original single-snake observation exactly, so training (``SnakeEnv``)
+    and any existing single-snake caller are unaffected.
     """
     c = window // 2
 
@@ -87,6 +94,9 @@ def ego_observation(
     for (x, y) in snake[:-1]:  # the tail cell frees up next tick
         deadly[y, x] = 1.0
     for (x, y) in snake:
+        body_full[y, x] = 1.0
+    for (x, y) in (opponent_cells or ()):
+        deadly[y, x] = 1.0
         body_full[y, x] = 1.0
     hx, hy = snake[0]
     head_map[hy, hx] = 1.0
