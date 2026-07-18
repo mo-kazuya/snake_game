@@ -1,10 +1,13 @@
-"""Tests for the Snake engine, AI, and HTTP endpoints."""
+"""Tests for the Snake engine, AI, and HTTP/WebSocket endpoints."""
 
 from __future__ import annotations
 
 import json
 
+from channels.testing import WebsocketCommunicator
 from django.test import TestCase
+
+from snakeai.asgi import application
 
 from . import ai, rl_agent
 from .engine import GameState
@@ -236,26 +239,62 @@ class ViewTests(TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()["state"]["grid"], 20)
 
-    def test_step_advances_game(self):
-        new = self.client.post("/api/new/", content_type="application/json").json()
-        gid = new["game_id"]
-        res = self.client.post(
-            "/api/step/", data=json.dumps({"game_id": gid}),
-            content_type="application/json",
-        )
-        self.assertEqual(res.status_code, 200)
-        data = res.json()
-        self.assertIn(data["direction"], ("up", "down", "left", "right"))
-        self.assertIn("state", data)
-
-    def test_unknown_game_id_404s(self):
-        res = self.client.post(
-            "/api/step/", data=json.dumps({"game_id": "nope"}),
-            content_type="application/json",
-        )
-        self.assertEqual(res.status_code, 404)
-
     def test_index_renders(self):
         res = self.client.get("/")
         self.assertEqual(res.status_code, 200)
         self.assertContains(res, "AIスネークゲーム")
+
+
+class GameConsumerTests(TestCase):
+    """The per-step move now travels over a WebSocket (game/consumers.py)."""
+
+    async def test_step_advances_game(self):
+        new = self.client.post("/api/new/", content_type="application/json").json()
+        gid = new["game_id"]
+        communicator = WebsocketCommunicator(application, f"/ws/game/{gid}/")
+        connected, _ = await communicator.connect()
+        self.assertTrue(connected)
+
+        await communicator.send_json_to({"strategy": "search"})
+        data = await communicator.receive_json_from()
+        self.assertIn(data["direction"], ("up", "down", "left", "right"))
+        self.assertEqual(data["strategy"], "search")
+        self.assertIn("state", data)
+
+        await communicator.disconnect()
+
+    async def test_multiple_steps_over_one_connection(self):
+        new = self.client.post("/api/new/", content_type="application/json").json()
+        gid = new["game_id"]
+        communicator = WebsocketCommunicator(application, f"/ws/game/{gid}/")
+        await communicator.connect()
+
+        steps_seen = 0
+        for _ in range(5):
+            await communicator.send_json_to({"strategy": "search"})
+            data = await communicator.receive_json_from()
+            steps_seen = data["state"]["steps"]
+
+        self.assertEqual(steps_seen, 5)
+        await communicator.disconnect()
+
+    async def test_unknown_game_id_sends_error_and_closes(self):
+        # Well-formed (32 hex chars, matches the route) but no such game.
+        communicator = WebsocketCommunicator(application, f"/ws/game/{'0' * 32}/")
+        connected, _ = await communicator.connect()
+        self.assertTrue(connected)  # the consumer accepts, then rejects
+
+        data = await communicator.receive_json_from()
+        self.assertEqual(data["error"], "unknown game_id")
+
+        close = await communicator.receive_output()
+        self.assertEqual(close["type"], "websocket.close")
+        self.assertEqual(close.get("code"), 4404)
+
+    async def test_malformed_game_id_is_refused_by_routing(self):
+        # Doesn't match the route's 32-hex-char pattern at all: Channels'
+        # URLRouter has no fallback to route to, so the connection is refused
+        # before it ever reaches GameConsumer.
+        communicator = WebsocketCommunicator(application, "/ws/game/not-a-valid-id/")
+        with self.assertRaises(ValueError):
+            await communicator.connect()

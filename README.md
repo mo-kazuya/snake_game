@@ -6,13 +6,16 @@
 ## アーキテクチャ
 
 ```
-ブラウザ (Canvas描画)  ──POST /api/step/──▶  Django
-        ▲                                      │
-        └──────── JSON（盤面の状態） ◀──────────┘
+ブラウザ (Canvas描画)  ──WebSocket ws/game/<id>/──▶  Django (Channels)
+        ▲                                              │
+        └───────────── JSON（盤面の状態） ◀────────────┘
 ```
 
 - **Djangoがゲームの真実の源（authoritative）**。盤面・ヘビ・エサ・スコアはすべてサーバーが保持します。
-- ブラウザは一定間隔で `/api/step/` を呼び、サーバーのAIが決めた次の一手を反映して描画するだけです。
+- ゲーム開始時に `POST /api/new/` でゲームを作成した後、ブラウザは1本のWebSocket
+  （`ws/game/<game_id>/`）を張りっぱなしにし、一定間隔でメッセージを送って
+  サーバーのAIが決めた次の一手を反映して描画するだけです（毎ティックHTTPリクエストは
+  発生しません）。
 - ヘビの操作は完全にAI任せ（人間は操作しません）。
 
 ### 主要ファイル
@@ -23,7 +26,10 @@
 | `game/ai.py` | 探索AI本体＋戦略ディスパッチャ |
 | `game/rl_agent.py` | 学習済みPPOモデルのアダプタ（gym_snakeで学習した重みを読み込む） |
 | `game/store.py` | 進行中ゲームのインメモリ保管 |
-| `game/views.py` | HTTP APIエンドポイント |
+| `game/views.py` | HTTP APIエンドポイント（ゲーム作成・状態取得） |
+| `game/consumers.py` | WebSocketコンシューマー（毎ティックのAI着手） |
+| `game/routing.py` | WebSocket URLルーティング |
+| `snakeai/asgi.py` | ASGIエントリポイント（HTTP/WebSocketの振り分け） |
 | `game/templates/game/index.html` | フロントエンド（描画とAIループ） |
 
 ## 4種類のAI
@@ -87,6 +93,10 @@ pip install -r requirements.txt
 python manage.py runserver
 ```
 
+`channels`/`daphne` がインストール済みだと `manage.py runserver` は自動的にDaphne
+（ASGIサーバー）で起動し、同じポートでHTTPとWebSocketの両方を捌きます。追加の
+コマンドやポート設定は不要です。
+
 ブラウザで <http://127.0.0.1:8000/> を開き、「スタート」を押すとAIがプレイを始めます。
 
 - **盤面サイズ**（10×10 / 14×14 / 20×20 / 30×30 / 40×40）をセレクタで選べます。
@@ -101,8 +111,10 @@ python manage.py runserver
 |----------------|------|
 | `GET /` | ゲーム画面 |
 | `POST /api/new/` | 新規ゲームを作成（body: `{"strategy": ..., "grid": 8〜50}`。省略時は20。モデルが特定サイズを要求する場合はそちらを優先）。`game_id`・初期状態・`strategies`（各AIの `available` と必要盤面サイズ `grid`）を返す |
-| `POST /api/step/` | AIが一手進め、更新後の状態を返す（body: `{"game_id": "...", "strategy": "search"\|"rl"\|"rl_cnn"}`）。レスポンスの `strategy` は実際に使われたAI（フォールバック時は `"search"`） |
 | `GET /api/state/?game_id=...` | 現在の状態を取得（進めない） |
+| `WS /ws/game/<game_id>/` | 毎ティックのAI着手用WebSocket。クライアントが `{"strategy": "search"\|"rl"\|"rl_cnn"\|"rl_trf"}` を送るたびにサーバーが一手進め、`{"game_id", "direction", "strategy", "event", "state"}` を1メッセージ返す（`strategy` は実際に使われたAI。フォールバック時は `"search"`）。`game_id` が存在しない場合は `{"error": "unknown game_id"}` を送ってから接続を閉じる（close code `4404`） |
+
+以前の `POST /api/step/`（毎ティックHTTPリクエスト）はこのWebSocketに置き換えられ、廃止されました。
 
 ## テスト
 
@@ -110,7 +122,7 @@ python manage.py runserver
 python manage.py test
 ```
 
-エンジン・AI・APIの14テストが含まれています。
+エンジン・AI・HTTP API・WebSocketコンシューマーのテストが含まれています。
 
 ## 補足
 

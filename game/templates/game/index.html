@@ -233,6 +233,7 @@
       let stepDelay = Number(speedRange.value); // ms between AI moves
       let timer = null;
       let CELL = 20;
+      let socket = null; // WebSocket carrying the per-step traffic
 
       // High scores are kept per board size (a 10x10 score and a 40x40 score
       // are not comparable).
@@ -259,6 +260,40 @@
         });
         if (!res.ok) throw new Error('API error ' + res.status);
         return res.json();
+      }
+
+      // Per-step traffic goes over a WebSocket (one connection per game)
+      // instead of a POST per tick. Resolves once the socket is open.
+      function openSocket(id) {
+        return new Promise((resolve, reject) => {
+          const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+          const ws = new WebSocket(proto + '://' + location.host + '/ws/game/' + id + '/');
+          let opened = false;
+
+          ws.addEventListener('open', () => {
+            opened = true;
+            resolve(ws);
+          });
+
+          ws.addEventListener('message', (evt) => {
+            if (ws !== socket) return; // late message from a replaced connection
+            handleStepMessage(JSON.parse(evt.data));
+          });
+
+          ws.addEventListener('close', () => {
+            if (ws !== socket) return;
+            if (running) {
+              statusEl.textContent = '通信が切断されました';
+              stopLoop();
+            }
+          });
+
+          ws.addEventListener('error', () => {
+            if (!opened) reject(new Error('WebSocket接続に失敗しました'));
+          });
+
+          socket = ws;
+        });
       }
 
       function applyState(s) {
@@ -292,6 +327,10 @@
 
       async function newGame() {
         stopLoop();
+        if (socket) {
+          socket.close();
+          socket = null;
+        }
         const data = await api('/api/new/', {
           strategy: strategySelect.value,
           grid: Number(gridSelect.value),
@@ -301,6 +340,15 @@
         applyState(data.state);
         highScore = loadHighScore(data.state.grid);
         highScoreEl.textContent = highScore;
+
+        statusEl.textContent = '接続中...';
+        try {
+          await openSocket(gameId);
+        } catch (e) {
+          statusEl.textContent = '通信エラー: ' + e.message;
+          return;
+        }
+
         overlay.classList.add('hidden');
         running = true;
         paused = false;
@@ -320,16 +368,21 @@
         clearTimeout(timer);
       }
 
-      async function tick() {
+      // Fire one step request over the socket; the response arrives
+      // asynchronously in handleStepMessage.
+      function tick() {
         if (!running || paused) return;
-        let data;
-        try {
-          data = await api('/api/step/', {
-            game_id: gameId,
-            strategy: strategySelect.value,
-          });
-        } catch (e) {
-          statusEl.textContent = '通信エラー: ' + e.message;
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+          statusEl.textContent = '通信エラー: WebSocketが接続されていません';
+          return;
+        }
+        socket.send(JSON.stringify({ strategy: strategySelect.value }));
+      }
+
+      function handleStepMessage(data) {
+        if (data.error) {
+          statusEl.textContent = '通信エラー: ' + data.error;
+          stopLoop();
           return;
         }
         applyState(data.state);
@@ -352,6 +405,10 @@
 
       function endGame() {
         stopLoop();
+        if (socket) {
+          socket.close();
+          socket = null;
+        }
         pauseBtn.disabled = true;
         if (state.score > highScore) {
           highScore = state.score;
