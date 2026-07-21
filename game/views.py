@@ -37,19 +37,20 @@ def _parse_body(request) -> dict:
         return {}
 
 
-_NUM_SNAKES = 2
+_MAX_SNAKES = 2
+_DEFAULT_STRATEGIES = ["search", "search"]
 
 
 @csrf_exempt
 @require_POST
 def new_game(request):
     data = _parse_body(request)
-    strategies = data.get("strategies", ["search"] * _NUM_SNAKES)
+    strategies = data.get("strategies", _DEFAULT_STRATEGIES)
     if not isinstance(strategies, list) or not strategies:
-        strategies = ["search"] * _NUM_SNAKES
-    # Always exactly _NUM_SNAKES entries: pad with "search", drop extras.
-    strategies = (list(strategies) + ["search"] * _NUM_SNAKES)[:_NUM_SNAKES]
-    strategies = [s if isinstance(s, str) else "search" for s in strategies]
+        strategies = _DEFAULT_STRATEGIES
+    # One entry -> a solo game; two -> a battle. Extras beyond that are
+    # dropped rather than spawning more snakes (untested board geometry).
+    strategies = [s if isinstance(s, str) else "search" for s in strategies][:_MAX_SNAKES]
 
     # Board size: the client picks it freely (all current AIs are size-
     # independent); a model that requires a specific board would override it.

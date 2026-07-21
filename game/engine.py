@@ -88,13 +88,18 @@ class GameState:
     # -- lifecycle ---------------------------------------------------------
 
     def reset(self, strategies: list[str]) -> None:
-        """Start a new game with one snake per entry in ``strategies``."""
+        """Start a new game with one snake per entry in ``strategies``.
+
+        A single strategy spawns one snake dead-center, same as the original
+        single-snake layout. Two or more spawn on separate rows, facing away
+        from each other, so they don't start overlapping or immediately
+        head-to-head.
+        """
         mid = self.grid // 2
+        solo = len(strategies) == 1
         self.snakes = []
         for i, strategy in enumerate(strategies):
-            # Snakes start on separate rows, facing away from each other, so
-            # they don't spawn overlapping or immediately head-to-head.
-            row = mid - 2 if i % 2 == 0 else mid + 2
+            row = mid if solo else (mid - 2 if i % 2 == 0 else mid + 2)
             heading = "right" if i % 2 == 0 else "left"
             dx = -1 if heading == "right" else 1
             body = [(mid + dx * j, row) for j in range(3)]

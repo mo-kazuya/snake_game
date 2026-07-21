@@ -160,6 +160,8 @@
     select:disabled { opacity: 0.5; cursor: not-allowed; }
     option { color: #06281a; }
 
+    .hidden { display: none !important; }
+
     .status {
       margin-top: 10px;
       font-size: 0.8rem;
@@ -173,7 +175,7 @@
 </head>
 <body>
   <h1>🤖🐍 AIスネークゲーム</h1>
-  <div class="subtitle">Djangoサーバー上の2匹のAIがヘビを自動操作します</div>
+  <div class="subtitle" id="subtitle">Djangoサーバー上の2匹のAIがヘビを自動操作します</div>
 
   <div class="scoreboard">
     <div class="snake-stat s1" id="stat0"><span class="dot"></span>S1 スコア: <b id="score0">0</b> 長さ: <b id="length0">0</b></div>
@@ -187,16 +189,23 @@
     <div class="overlay" id="overlay">
       <h2 id="overlayTitle">AIスネークゲーム</h2>
       <p id="overlayText">
-        「スタート」を押すと、サーバー側の2匹のAIが<br>
-        同じエサを取り合いながらヘビを動かします。
+        「スタート」を押すと、サーバー側のAIが<br>
+        エサを目指してヘビを動かします。
       </p>
       <button id="startBtn">スタート</button>
     </div>
   </div>
 
   <div class="controls">
+    <div class="mode">
+      モード
+      <select id="modeSelect">
+        <option value="battle" selected>2匹で対戦</option>
+        <option value="solo">1匹で操作</option>
+      </select>
+    </div>
     <div class="mode s1">
-      S1 AI
+      <span id="s1Label">S1 AI</span>
       <select id="strategySelect0">
         <option value="search">探索AI (BFS)</option>
         <option value="rl">学習済みAI (features/MLP)</option>
@@ -204,7 +213,7 @@
         <option value="rl_trf">学習済みAI (ego/Transformer)</option>
       </select>
     </div>
-    <div class="mode s2">
+    <div class="mode s2" id="s2Controls">
       S2 AI
       <select id="strategySelect1">
         <option value="search" selected>探索AI (BFS)</option>
@@ -255,6 +264,10 @@
       ];
       const gridSelect = document.getElementById('gridSelect');
       const statusEl = document.getElementById('status');
+      const modeSelect = document.getElementById('modeSelect');
+      const s2Controls = document.getElementById('s2Controls');
+      const s1Label = document.getElementById('s1Label');
+      const subtitleEl = document.getElementById('subtitle');
 
       // Colors for snake 0 (head/body) and snake 1 (head/body).
       const SNAKE_COLORS = [
@@ -287,6 +300,24 @@
       strategySelects[0].querySelectorAll('option').forEach((o) => {
         baseLabels[o.value] = o.textContent;
       });
+
+      // 1 snake ("solo") or 2 ("battle"); the server mirrors whichever count
+      // of strategies it's sent, so this is the only place that decides it.
+      function isSolo() { return modeSelect.value === 'solo'; }
+      function activeStrategies() {
+        return isSolo() ? [strategySelects[0].value] : strategySelects.map((s) => s.value);
+      }
+
+      function applyMode() {
+        const solo = isSolo();
+        s2Controls.classList.toggle('hidden', solo);
+        statEls[1].classList.toggle('hidden', solo);
+        s1Label.textContent = solo ? 'AI' : 'S1 AI';
+        subtitleEl.textContent = solo
+          ? 'Djangoサーバー上のAIがヘビを自動操作します'
+          : 'Djangoサーバー上の2匹のAIがヘビを自動操作します';
+      }
+      applyMode();
 
       async function api(path, body) {
         const res = await fetch(path, {
@@ -335,6 +366,10 @@
       function applyState(s) {
         state = s;
         CELL = canvas.width / s.grid;
+        // Clear stale "dead" styling first: a solo game only touches
+        // statEls[0] below, so a previous battle's statEls[1] wouldn't
+        // otherwise be reset.
+        statEls.forEach((el) => el.classList.remove('dead'));
         s.snakes.forEach((snake, i) => {
           scoreEls[i].textContent = snake.score;
           lengthEls[i].textContent = snake.length;
@@ -373,7 +408,7 @@
           socket = null;
         }
         const data = await api('/api/new/', {
-          strategies: strategySelects.map((s) => s.value),
+          strategies: activeStrategies(),
           grid: Number(gridSelect.value),
         });
         gameId = data.game_id;
@@ -417,7 +452,7 @@
           statusEl.textContent = '通信エラー: WebSocketが接続されていません';
           return;
         }
-        socket.send(JSON.stringify({ strategies: strategySelects.map((s) => s.value) }));
+        socket.send(JSON.stringify({ strategies: activeStrategies() }));
       }
 
       const STRATEGY_LABELS = {
@@ -435,10 +470,12 @@
         }
         applyState(data.state);
 
+        const solo = data.state.snakes.length === 1;
         statusEl.innerHTML = data.state.snakes.map((snake, i) => {
-          if (!snake.alive) return 'S' + (i + 1) + ': 死亡';
+          const tag = solo ? '' : 'S' + (i + 1) + ': ';
+          if (!snake.alive) return tag + '死亡';
           const label = STRATEGY_LABELS[data.strategies[i]] || data.strategies[i];
-          return 'S' + (i + 1) + ': ' + label + ' → <span class="dir s' + (i + 1) + '">' +
+          return tag + label + ' → <span class="dir s' + (i + 1) + '">' +
             data.directions[i] + '</span>';
         }).join('　｜　') + '　（盤面 ' + state.grid + '×' + state.grid + '）';
 
@@ -465,11 +502,14 @@
         }
 
         // The board only runs out of food once every cell is a snake body,
-        // i.e. both snakes together "cleared" it.
+        // i.e. the snake(s) together "cleared" it.
         const won = state.food === null;
+        const solo = snakes.length === 1;
         let title;
         if (won) {
           title = 'AIクリア！ 🎉';
+        } else if (solo) {
+          title = snakes[0].stalled ? '行き詰まり（タイムアウト）' : 'ゲームオーバー';
         } else if (snakes[0].score === snakes[1].score) {
           title = '引き分け';
         } else {
@@ -479,8 +519,9 @@
         overlayTitle.textContent = title;
 
         overlayText.innerHTML = snakes.map((s, i) => {
+          const tag = solo ? '' : 'S' + (i + 1) + ': ';
           const reason = s.alive ? '' : (s.stalled ? '（行き詰まり）' : '（死亡）');
-          return 'S' + (i + 1) + ': スコア <b>' + s.score + '</b>　長さ <b>' + s.length + '</b> ' + reason;
+          return tag + 'スコア <b>' + s.score + '</b>　長さ <b>' + s.length + '</b> ' + reason;
         }).join('<br>') + '<br>手数: <b>' + state.steps + '</b>';
 
         startBtn.textContent = 'もう一度';
@@ -551,6 +592,14 @@
         stepDelay = 330 - Number(speedRange.value);
       });
       stepDelay = 330 - Number(speedRange.value);
+
+      // Switching between solo and battle changes the number of snakes, so it
+      // always starts a fresh game (a running one, or just to refresh the
+      // idle board once a game exists).
+      modeSelect.addEventListener('change', () => {
+        applyMode();
+        if (running || gameId) newGame();
+      });
 
       // Changing an AI mid-game: if the new AI needs a different board size,
       // restart on the right board. Otherwise the switch is live and takes

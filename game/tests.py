@@ -28,6 +28,29 @@ class EngineTests(TestCase):
         self.assertEqual(len(occupied), 6)
         self.assertNotIn(s.food, occupied)
 
+    def test_reset_solo_spawns_one_centered_snake(self):
+        s = GameState(grid=20)
+        s.reset(["search"])
+        self.assertEqual(len(s.snakes), 1)
+        self.assertEqual(len(s.snakes[0].body), 3)
+        self.assertEqual(s.snakes[0].body[0], (10, 10))  # dead center
+        self.assertNotIn(s.food, set(s.snakes[0].body))
+
+    def test_reset_battle_spawns_two_non_overlapping_snakes(self):
+        s = GameState(grid=20)
+        s.reset(["search", "rl_cnn"])
+        self.assertEqual(len(s.snakes), 2)
+        self.assertEqual(s.snakes[0].strategy, "search")
+        self.assertEqual(s.snakes[1].strategy, "rl_cnn")
+        occupied = {cell for snake in s.snakes for cell in snake.body}
+        self.assertEqual(len(occupied), 6)  # no overlap
+
+    def test_solo_game_ends_when_the_only_snake_dies(self):
+        s = GameState(grid=10, snakes=[Snake(body=[(9, 5), (8, 5), (7, 5)], direction="right")])
+        s.step(["right"])  # wall collision
+        self.assertFalse(s.snakes[0].alive)
+        self.assertTrue(s.game_over)
+
     def test_move_advances_head(self):
         s = GameState(grid=20, snakes=[Snake(body=[(10, 10), (9, 10), (8, 10)], direction="right")])
         head = s.snakes[0].body[0]
@@ -388,21 +411,33 @@ class ViewTests(TestCase):
 
     def test_new_game_accepts_per_snake_strategies(self):
         res = self.client.post(
-            "/api/new/", data=json.dumps({"strategies": ["search", "search"]}),
+            "/api/new/", data=json.dumps({"strategies": ["search", "rl_cnn"]}),
             content_type="application/json",
         )
         data = res.json()["state"]
+        self.assertEqual(len(data["snakes"]), 2)
         self.assertEqual(data["snakes"][0]["strategy"], "search")
-        self.assertEqual(data["snakes"][1]["strategy"], "search")
+        self.assertEqual(data["snakes"][1]["strategy"], "rl_cnn")
 
-    def test_new_game_pads_missing_strategies(self):
+    def test_new_game_solo_spawns_one_snake(self):
         res = self.client.post(
             "/api/new/", data=json.dumps({"strategies": ["search"]}),
             content_type="application/json",
         )
         data = res.json()["state"]
-        self.assertEqual(len(data["snakes"]), 2)
-        self.assertEqual(data["snakes"][1]["strategy"], "search")
+        self.assertEqual(len(data["snakes"]), 1)
+        self.assertEqual(data["snakes"][0]["strategy"], "search")
+
+    def test_new_game_defaults_to_two_snakes(self):
+        res = self.client.post("/api/new/", content_type="application/json")
+        self.assertEqual(len(res.json()["state"]["snakes"]), 2)
+
+    def test_new_game_caps_at_two_snakes(self):
+        res = self.client.post(
+            "/api/new/", data=json.dumps({"strategies": ["search", "search", "search"]}),
+            content_type="application/json",
+        )
+        self.assertEqual(len(res.json()["state"]["snakes"]), 2)
 
     def test_new_game_ignores_malformed_strategies(self):
         res = self.client.post(
@@ -460,6 +495,25 @@ class GameConsumerTests(TestCase):
         self.assertEqual(len(steps_history), 5)
         self.assertEqual(steps_history, sorted(steps_history))
         self.assertGreaterEqual(steps_history[0], 1)
+        await communicator.disconnect()
+
+    async def test_solo_game_steps_one_snake(self):
+        new = self.client.post(
+            "/api/new/", data=json.dumps({"strategies": ["search"]}),
+            content_type="application/json",
+        ).json()
+        gid = new["game_id"]
+        communicator = WebsocketCommunicator(application, f"/ws/game/{gid}/")
+        await communicator.connect()
+
+        await communicator.send_json_to({"strategies": ["search"]})
+        data = await communicator.receive_json_from()
+        self.assertEqual(len(data["directions"]), 1)
+        self.assertEqual(data["strategies"], ["search"])
+        self.assertEqual(len(data["events"]), 1)
+        self.assertEqual(len(data["state"]["snakes"]), 1)
+        self.assertIn(data["directions"][0], ("up", "down", "left", "right"))
+
         await communicator.disconnect()
 
     async def test_different_ai_per_snake_falls_back_independently(self):
