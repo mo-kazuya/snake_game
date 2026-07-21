@@ -91,10 +91,57 @@ PPOで実際に学習させた結果（学習曲線・スコア推移・学習�
 python examples/train_sb3.py --obs ego --grid 10 --timesteps 3000000
 ```
 
+## 2匹対戦環境 (`SnakeBattle-v0`)
+
+単独学習では相手のいる盤面を経験できないため、**2匹が同じ盤面・同じエサを取り合う
+対戦環境** `gym_snake/SnakeBattle-v0`（[`gym_snake/envs/battle_env.py`](envs/battle_env.py)）
+を同梱しています。ルールは Django サーバーと同じ権威的エンジン（`game.engine.GameState`）
+をそのまま使うので、**学習時と本番のルールが完全一致**します（エサ共有・相手の体や
+正面衝突での死・片方が死んでももう片方は続行）。
+
+- **エージェントは snake 0** を操作し、snake 1 は設定可能な**相手方策**が動かします。
+- 観測は単独時と**同じ固定形状の ego 観測**ですが、`opponent_cells` に相手の体を
+  重ねて渡すため、モデルは「動く相手」を危険チャンネル上で認識できます。観測・行動
+  空間が単独版と同一なので、**単独学習済みTransformerからそのままウォームスタート**できます。
+- 基本報酬は `SnakeEnv` と同一（価値ヘッドの再利用のため）。任意で対戦特化のボーナス
+  （相手撃破 `reward_opp_death`／勝敗 `reward_win`・`reward_lose`）を上乗せできます。
+
+```python
+import gymnasium as gym
+import gym_snake  # 登録のため
+
+env = gym.make("gym_snake/SnakeBattle-v0", grid_size=12, opponent="search",
+               reward_win=1.0, reward_lose=-1.0)
+obs, info = env.reset(seed=0)   # obs.shape == (5, 11, 11)
+```
+
+相手方策 `opponent` は次の文字列で指定します（`make_opponent`）:
+
+| spec | 相手の動き |
+|------|-----------|
+| `"search"`（既定） | BFS/フラッドフィルの探索AI（本番と同じ強敵） |
+| `"random"` | 一様ランダムな**安全手**（カリキュラムの多様性用） |
+| `"model:<path>"` | 凍結したPPOチェックポイント（**自己対戦**用。遅延ロードでpicklable） |
+
+この環境で**単独Transformerをファインチューニングして対戦特化モデルを作る**
+2段階レシピが [`examples/train_transformer_battle.py`](../examples/train_transformer_battle.py)
+です（ウォームスタート→任意の対戦BC→対戦PPO、勝率ゲート付き）。生成物
+`ppo_snake_transformer_battle.zip` は Django 側で `rl_trf_battle` として選択できます。
+
+```bash
+# 既存Transformerからウォームスタートし、探索AI+ランダム相手にPPO
+python examples/train_transformer_battle.py
+
+# 自己対戦（前世代のチェックポイントを相手に）
+python examples/train_transformer_battle.py \
+    --opponents search,model:examples/ppo_snake_transformer_battle.zip
+```
+
 ## テスト
 
 ```bash
 pytest gym_snake/tests/
 ```
 
-Gymnasium の `check_env` によるAPI準拠チェックを全観測モードで含みます。
+Gymnasium の `check_env` によるAPI準拠チェックを全観測モードで含みます
+（単独 `SnakeEnv`・対戦 `SnakeBattleEnv` の両方）。

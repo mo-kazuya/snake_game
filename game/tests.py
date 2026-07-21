@@ -321,6 +321,20 @@ class RLAgentTests(TestCase):
         self.assertIsNone(rl_agent.required_grid("rl"))
         self.assertIsNone(rl_agent.required_grid("rl_cnn"))
         self.assertIsNone(rl_agent.required_grid("rl_trf"))
+        self.assertIsNone(rl_agent.required_grid("rl_trf_battle"))
+
+    def test_battle_transformer_is_registered(self):
+        # The battle-tuned Transformer is a first-class RL strategy and shows up
+        # in the frontend metadata (available flag tracks the weights file).
+        self.assertIn("rl_trf_battle", rl_agent.MODEL_NAMES)
+        meta = rl_agent.strategies_meta()
+        self.assertIn("rl_trf_battle", meta)
+        self.assertIn("対戦", meta["rl_trf_battle"]["label"])
+        self.assertIsNone(meta["rl_trf_battle"]["grid"])
+        self.assertEqual(
+            meta["rl_trf_battle"]["available"],
+            rl_agent.is_available("rl_trf_battle"),
+        )
 
     def test_choose_falls_back_to_search_when_unknown(self):
         s = GameState(grid=20)
@@ -353,6 +367,25 @@ class RLAgentTests(TestCase):
             direction, used = ai.choose(s, 0, strategy="rl_trf")
             self.assertEqual(used, "rl_trf", f"grid={grid}")
             self.assertIn(direction, ("up", "down", "right"))  # never reverse
+
+    def test_battle_transformer_works_on_any_board_size(self):
+        if not rl_agent.is_available("rl_trf_battle"):
+            self.skipTest("battle-tuned Transformer model not available")
+        for grid in (10, 20):
+            s = GameState(grid=grid, snakes=[Snake(body=[(6, 6), (5, 6), (4, 6)], direction="right")])
+            direction, used = ai.choose(s, 0, strategy="rl_trf_battle")
+            self.assertEqual(used, "rl_trf_battle", f"grid={grid}")
+            self.assertIn(direction, ("up", "down", "right"))  # never reverse
+
+    def test_battle_transformer_falls_back_when_unavailable(self):
+        # Until the battle weights ship, selecting the strategy must degrade to
+        # the search AI instead of erroring (same graceful path as any missing
+        # model). When the weights are present this simply runs the model.
+        s = GameState(grid=20, snakes=[Snake(body=[(10, 10), (9, 10), (8, 10)], direction="right")])
+        direction, used = ai.choose(s, 0, strategy="rl_trf_battle")
+        expected = "rl_trf_battle" if rl_agent.is_available("rl_trf_battle") else "search"
+        self.assertEqual(used, expected)
+        self.assertIn(direction, ("up", "down", "left", "right"))
 
     def test_rl_works_with_a_second_snake_on_board(self):
         """RL strategies must not crash just because a second snake exists,

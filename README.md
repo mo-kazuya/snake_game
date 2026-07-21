@@ -70,6 +70,7 @@
 | 学習済みAI (features/MLP) | `game/rl_agent.py` + `examples/ppo_snake_features.zip` | 任意（既定 20×20） |
 | 学習済みAI (ego/CNN) | `game/rl_agent.py` + `examples/ppo_snake_ego.zip` | 任意（既定 20×20） |
 | 学習済みAI (ego/Transformer) | `game/rl_agent.py` + `examples/ppo_snake_transformer.zip` | 任意（既定 20×20） |
+| 学習済みAI (ego/Transformer 対戦特化) | `game/rl_agent.py` + `examples/ppo_snake_transformer_battle.zip` | 任意（既定 20×20） |
 
 ### 1. 探索AI (BFS) — `game/ai.py`
 
@@ -106,16 +107,27 @@
   40×40で約95）。PPO単独で学習したv1はCNNに大きく劣っており（平均8.9）、
   「Transformerの弱い帰納バイアスを教師データで補う」効果の実証になっています。
   詳細な分析は `examples/TRAINING_RESULTS.md` を参照。
+- **ego/Transformer 対戦特化** … 上のTransformerと**同じアーキテクチャ**を、**2匹対戦環境
+  （`gym_snake/SnakeBattle-v0`）でファインチューニング**したモデル。既存モデルが相手を
+  「静的な壁」としてしか扱えないのに対し、こちらは**動く相手のいる盤面で実際に学習**する
+  ため、エサの取り合い・相手の回避・正面衝突の回避といった対戦特有の判断を身につけます。
+  単独版からウォームスタートし、任意で対戦BC → 対戦PPO（勝率ゲート付き）で作ります
+  （`examples/train_transformer_battle.py`）。観測・行動空間は単独版と同一なので、単独
+  モードでもそのまま動作します（相手セルが空になるだけ）。**学習レシピと環境は本リポジトリ
+  に同梱していますが、重みファイル `examples/ppo_snake_transformer_battle.zip` はGPUでの
+  学習が必要なため未同梱です**（無い間は下記のとおり探索AIへフォールバックします）。
 - **依存の無い環境でも安全**: `stable-baselines3`/`torch`（CNN/Transformerは加えて `gym_snake`）が未インストール、
   またはモデルファイルが無い場合は自動的に探索AIへフォールバックし、フロント側では該当オプションが
   選択不可になります。
 - 初回推論の遅延を隠すため、ゲーム作成時に選択中のモデルをバックグラウンドで事前ロードします。
-- **もう1匹への対応**: これらのモデルは単一のヘビしかいない環境で学習済みのため、
+- **もう1匹への対応**: 対戦特化を除く3モデルは単一のヘビしかいない環境で学習済みのため、
   相手を専用に認識する仕組みは持ちません。ただし相手の体のマスは、既存の「危険」
   センサー（featuresの3方向の危険フラグ、grid/egoの体チャンネル）に**探索AIと同じ扱いで
   重ねて**渡しており（`game/rl_agent.py`、`gym_snake/obs.py` の `opponent_cells`
   パラメータ、単一ヘビ利用時は引数省略でこれまでと完全に同じ観測になり学習済み重みへの
-  影響はありません）、再学習なしである程度の回避行動は期待できます。
+  影響はありません）、再学習なしである程度の回避行動は期待できます。**ego/Transformer 対戦
+  特化**モデルだけは、この同じ `opponent_cells` チャンネルに相手を載せた状態で最初から学習
+  しているため、回避にとどまらない対戦本来の駆け引きを行います。
 
 学習済みAIを使うには追加依存が必要です（学習方法は [`gym_snake/README.md`](gym_snake/README.md) 参照）:
 
@@ -153,7 +165,7 @@ python manage.py runserver
 | `GET /` | ゲーム画面 |
 | `POST /api/new/` | 新規ゲームを作成（body: `{"strategies": [...], "grid": 8〜50}`。`strategies` の**要素数がヘビの数**で、1個ならソロ・2個ならバトル（3個以上は2個に切り詰め、空・不正時は2匹の探索AIに）。モデルが特定サイズを要求する場合はそちらを優先）。`game_id`・初期状態（`state.snakes` がヘビの数だけの配列）・`strategies`（各AIの `available` と必要盤面サイズ `grid`）を返す |
 | `GET /api/state/?game_id=...` | 現在の状態を取得（進めない） |
-| `WS /ws/game/<game_id>/` | 毎ティックのAI着手用WebSocket。クライアントが `{"strategies": ["search"\|"rl"\|"rl_cnn"\|"rl_trf", ...]}`（ヘビの数だけの配列）を送るたびにサーバーが全ヘビの一手を同時に進め、`{"game_id", "directions", "strategies", "events", "state"}` を1メッセージ返す（`directions`/`strategies`/`events` はいずれもヘビの数だけの配列。`strategies` は実際に使われたAI。フォールバック時は `"search"`）。`game_id` が存在しない場合は `{"error": "unknown game_id"}` を送ってから接続を閉じる（close code `4404`） |
+| `WS /ws/game/<game_id>/` | 毎ティックのAI着手用WebSocket。クライアントが `{"strategies": ["search"\|"rl"\|"rl_cnn"\|"rl_trf"\|"rl_trf_battle", ...]}`（ヘビの数だけの配列）を送るたびにサーバーが全ヘビの一手を同時に進め、`{"game_id", "directions", "strategies", "events", "state"}` を1メッセージ返す（`directions`/`strategies`/`events` はいずれもヘビの数だけの配列。`strategies` は実際に使われたAI。フォールバック時は `"search"`）。`game_id` が存在しない場合は `{"error": "unknown game_id"}` を送ってから接続を閉じる（close code `4404`） |
 
 以前の `POST /api/step/`（毎ティックHTTPリクエスト）はこのWebSocketに置き換えられ、廃止されました。
 

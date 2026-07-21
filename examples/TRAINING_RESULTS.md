@@ -517,3 +517,64 @@ python examples/train_transformer_v2.py
 
 学習済みモデルは `examples/ppo_snake_transformer.zip`（v2で置き換え済み）。
 Django版ではAIセレクタの「学習済みAI (ego/Transformer)」で観戦できます。
+
+---
+
+## 対戦特化 ego/Transformer（`rl_trf_battle`）— 学習レシピと環境
+
+上記までのモデルはすべて**単独（1匹）**で学習しており、Django のバトルでは相手を
+危険チャンネルに畳み込んだ「静的な壁」としてしか見ていません。相手はエサを取り合い、
+毎ティック動き、頭同士がぶつかれば相打ちになる——こうした**対戦本来の駆け引きは未学習**です。
+
+これを埋めるのが `rl_trf_battle` で、**2匹対戦環境 `gym_snake/SnakeBattle-v0`**
+（[`../gym_snake/envs/battle_env.py`](../gym_snake/envs/battle_env.py)）で
+出荷版 Transformer をファインチューニングして作ります。
+
+### 環境設計のポイント
+
+- **本番と同じ権威的エンジン**（`game.engine.GameState`）をそのまま内包。エサ共有・相手の
+  体や正面衝突での死・片方生存時の続行まで、学習時と Django 本番のルールが一致します。
+- **エージェント = snake 0**、snake 1 は相手方策（`search` / `random` / 自己対戦の
+  `model:<path>`）。観測は**単独時と同一の固定形状 ego 観測**に、相手の体を
+  `opponent_cells` として重ねたもの。**観測・行動空間が単独版と完全一致**するため、
+  単独学習済み Transformer の重みを **`state_dict` 転送でそのままウォームスタート**できます
+  （全884,356パラメータがキー一致することを確認済み）。
+- 基本報酬は `SnakeEnv` と同一に保ち（価値ヘッドの再利用のため）、対戦特化ボーナス
+  （相手撃破 `+0.5`／勝ち `+1.0`／負け `-1.0`）を任意で上乗せ。ベスト保存ゲートは
+  **平均エサ数に勝率を重み付け**した指標で、「たくさん食べる」だけでなく「勝つ」方向へ
+  選抜します。
+
+### 3段階レシピ（`train_transformer_battle.py`）
+
+1. **ウォームスタート** — 出荷版 `ppo_snake_transformer.zip` の重みを対戦用 PPO へ転送
+   （`--no-init` で同アーキを新規学習も可）。
+2. *(任意)* **対戦BC** — 探索AI同士の対戦から snake 0 の手本を収集して模倣学習し、
+   価値・方策に対戦の事前分布を入れる（`--bc-transitions N`、0で省略）。
+3. **対戦PPO** — 盤面サイズと相手（既定 `search` + `random`）を混在させた
+   `SubprocVecEnv` で微調整。前世代を相手にすれば**自己対戦**で世代を重ねられます。
+
+```bash
+pip install -e ".[train]"
+
+# 出荷版からウォームスタートし、探索AI+ランダム相手にPPO
+python examples/train_transformer_battle.py
+
+# 対戦BCの事前学習を挟む
+python examples/train_transformer_battle.py --bc-transitions 600000
+
+# 自己対戦（前世代のチェックポイントを相手に）
+python examples/train_transformer_battle.py \
+    --opponents search,model:examples/ppo_snake_transformer_battle.zip
+```
+
+生成物 `examples/ppo_snake_transformer_battle.zip` は Django 側で自動的に
+**「学習済みAI (ego/Transformer 対戦特化)」**（`rl_trf_battle`）として選べるようになります
+（`game/rl_agent.py`）。単独版と同じ ego 経路で動くため、任意の盤面サイズ・ソロモードでも
+動作します。
+
+> **注記**: v2 と同じく Transformer の PPO は CPU では実用速度が出ない（8Mステップで
+> GPU 約83分に対し、CPUでは数十時間規模）ため、**学習レシピと環境・Django統合は本
+> リポジトリに同梱していますが、学習済みの重みファイル自体は未同梱**です。重みが無い間、
+> `rl_trf_battle` は他の学習済みAIと同様に自動で探索AIへフォールバックし、フロントでは
+> 選択肢が無効化されます（`game/rl_agent.py` の `is_available`）。上記コマンドをGPU環境で
+> 実行して `ppo_snake_transformer_battle.zip` を配置すれば、そのまま有効になります。

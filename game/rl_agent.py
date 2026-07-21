@@ -23,13 +23,20 @@ the ``gym_snake`` package that defines its feature extractor) aren't installed,
 or a model file is missing, :func:`is_available` returns ``False`` for that
 strategy and callers fall back to the search-based AI in :mod:`game.ai`.
 
-These models were trained single-snake, so they can't be given real opponent
-awareness without retraining. When a game has more than one snake, the other
-living snake's body cells are folded into the *existing* danger/body channels
-of each observation (see ``_feature_observation``/``_grid_observation`` below
-and ``gym_snake.obs.ego_observation``'s ``opponent_cells`` parameter) so the
-policy at least perceives it as "something to avoid", even though it was
+Most of these models were trained single-snake, so they can't be given real
+opponent awareness without retraining. When a game has more than one snake, the
+other living snake's body cells are folded into the *existing* danger/body
+channels of each observation (see ``_feature_observation``/``_grid_observation``
+below and ``gym_snake.obs.ego_observation``'s ``opponent_cells`` parameter) so
+the policy at least perceives it as "something to avoid", even though it was
 never trained with a second snake on the board.
+
+The one exception is ``"rl_trf_battle"``: the same ego/Transformer architecture,
+but **fine-tuned in the two-snake battle env** (``examples/train_transformer_battle.py``),
+so it was actually trained with a live opponent folded into the very same
+``opponent_cells`` channel. It loads and runs through exactly the same code path
+as ``"rl_trf"`` (identical observation and action space) -- only the weights
+differ.
 """
 
 from __future__ import annotations
@@ -73,6 +80,19 @@ _MODELS = {
         "grid": None,
         "label": "学習済みAI (ego/Transformer)",
         "needs_gym_snake": True,  # EgoTransformer class lives in gym_snake
+    },
+    "rl_trf_battle": {
+        # Same EgoTransformer architecture as ``rl_trf`` but fine-tuned in the
+        # two-snake battle env (see examples/train_transformer_battle.py), so it
+        # actually learned to contest the shared food, dodge the moving
+        # opponent and avoid head-on crashes rather than treating the rival as a
+        # static wall. Drop-in: identical ego observation and action space, so
+        # it runs on any board size and in solo mode too (opponent_cells empty).
+        "file": _EXAMPLES / "ppo_snake_transformer_battle.zip",
+        "obs": "ego",
+        "grid": None,
+        "label": "学習済みAI (ego/Transformer 対戦特化)",
+        "needs_gym_snake": True,
     },
 }
 
