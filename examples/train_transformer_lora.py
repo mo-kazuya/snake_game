@@ -18,12 +18,14 @@ Why LoRA here (and the honest caveats):
   checkpoint-size wins don't matter, and it does **not** speed up CPU training:
   the bottleneck is the Transformer *forward* pass, which LoRA doesn't reduce.
 
-Coverage: LoRA is injected into every ``nn.Linear`` we can target — the encoder
-FFN (``linear1``/``linear2``), attention output projection (``out_proj``), the
-feature head, and the SB3 policy/value MLPs and action/value heads. The packed
-q/k/v projection inside ``nn.MultiheadAttention`` (``in_proj_weight``) is not an
-``nn.Linear`` and is left frozen; the FFN + out_proj adapters carry the
-adaptation. (This mirrors the common "attention-output + MLP" LoRA recipe.)
+Coverage: LoRA is injected into the encoder FFN (``linear1``/``linear2``), the
+feature head, and the SB3 policy/value MLPs and action/value heads. The whole
+``self_attn`` block is left frozen: its q/k/v is a packed ``in_proj_weight``
+(not an ``nn.Linear``), and its ``out_proj`` -- although an ``nn.Linear`` -- is
+consumed by ``nn.MultiheadAttention`` through the fused functional path that
+reads ``out_proj.weight``/``.bias`` as raw attributes, so wrapping it as a
+module would break attention. The FFN carries the bulk of each encoder block's
+linear params, so the adapters live there plus the heads.
 
 Run:
 
@@ -127,9 +129,11 @@ def _make_lora_linear_cls():
 def inject_lora(policy, target_suffixes, r: int, alpha: int):
     """Replace targeted ``nn.Linear`` children of ``policy`` with LoRALinear.
 
-    Returns ``(lora_modules, name_to_base_linear_name)`` where the mapping keys
-    are the *base structure* weight names (``...linear1.weight``) used later to
-    write merged weights into a clean checkpoint.
+    Returns ``lora_modules``: a dict mapping each wrapped layer's dotted name
+    (e.g. ``features_extractor.encoder.layers.0.linear1``) to its LoRALinear.
+    Those same names index plain ``nn.Linear`` layers in a fresh base model,
+    which is how :func:`merge_to_clean_checkpoint` writes the merged weights
+    back into a drop-in checkpoint.
     """
     import torch.nn as nn
 
