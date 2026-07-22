@@ -37,11 +37,20 @@ def _parse_body(request) -> dict:
         return {}
 
 
+_MAX_SNAKES = 2
+_DEFAULT_STRATEGIES = ["search", "search"]
+
+
 @csrf_exempt
 @require_POST
 def new_game(request):
     data = _parse_body(request)
-    strategy = data.get("strategy", "search")
+    strategies = data.get("strategies", _DEFAULT_STRATEGIES)
+    if not isinstance(strategies, list) or not strategies:
+        strategies = _DEFAULT_STRATEGIES
+    # One entry -> a solo game; two -> a battle. Extras beyond that are
+    # dropped rather than spawning more snakes (untested board geometry).
+    strategies = [s if isinstance(s, str) else "search" for s in strategies][:_MAX_SNAKES]
 
     # Board size: the client picks it freely (all current AIs are size-
     # independent); a model that requires a specific board would override it.
@@ -49,14 +58,17 @@ def new_game(request):
         grid = int(data.get("grid", 20))
     except (TypeError, ValueError):
         grid = 20
-    grid = rl_agent.required_grid(strategy) or grid
+    for strategy in strategies:
+        grid = rl_agent.required_grid(strategy) or grid
     grid = max(8, min(grid, 50))  # keep the board sane
 
-    game_id, state = store.create(grid=grid)
+    game_id, state = store.create(grid=grid, strategies=strategies)
 
-    # Preload the selected RL policy in the background so its first move is fast.
-    if strategy in rl_agent.MODEL_NAMES:
-        rl_agent.warmup_async(strategy)
+    # Preload the selected RL policies in the background so their first move
+    # isn't slow.
+    for strategy in set(strategies):
+        if strategy in rl_agent.MODEL_NAMES:
+            rl_agent.warmup_async(strategy)
 
     return JsonResponse(
         {

@@ -22,9 +22,10 @@ _games: dict[str, GameState] = {}
 _MAX_GAMES = 500
 
 
-def create(grid: int = 20) -> tuple[str, GameState]:
+def create(grid: int = 20, strategies: list[str] | None = None) -> tuple[str, GameState]:
     game_id = uuid.uuid4().hex
     state = GameState(grid=grid)
+    state.reset(strategies or ["search", "search"])
     with _lock:
         if len(_games) >= _MAX_GAMES:
             oldest = next(iter(_games))

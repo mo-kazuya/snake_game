@@ -11,6 +11,8 @@
       --panel: #16213e;
       --accent: #4ade80;
       --accent-dark: #22c55e;
+      --p2: #38bdf8;
+      --p2-dark: #0ea5e9;
       --food: #f43f5e;
       --grid: #0f3460;
       --text: #e2e8f0;
@@ -53,9 +55,22 @@
       font-size: 0.95rem;
       flex-wrap: wrap;
       justify-content: center;
+      align-items: center;
     }
 
     .scoreboard b { color: var(--accent); }
+    .scoreboard .dot {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      margin-right: 4px;
+    }
+    .snake-stat.s1 .dot { background: var(--accent); }
+    .snake-stat.s1 b { color: var(--accent); }
+    .snake-stat.s2 .dot { background: var(--p2); }
+    .snake-stat.s2 b { color: var(--p2); }
+    .snake-stat.dead { opacity: 0.45; text-decoration: line-through; }
 
     .stage {
       position: relative;
@@ -141,8 +156,11 @@
       font-weight: bold;
       cursor: pointer;
     }
+    .mode.s2 select { color: var(--p2); }
     select:disabled { opacity: 0.5; cursor: not-allowed; }
     option { color: #06281a; }
+
+    .hidden { display: none !important; }
 
     .status {
       margin-top: 10px;
@@ -151,16 +169,17 @@
       min-height: 1.2em;
       text-align: center;
     }
-    .status .dir { color: var(--accent); font-weight: bold; text-transform: uppercase; }
+    .status .dir.s1 { color: var(--accent); font-weight: bold; text-transform: uppercase; }
+    .status .dir.s2 { color: var(--p2); font-weight: bold; text-transform: uppercase; }
   </style>
 </head>
 <body>
   <h1>🤖🐍 AIスネークゲーム</h1>
-  <div class="subtitle">Djangoサーバー上のAIがヘビを自動操作します</div>
+  <div class="subtitle" id="subtitle">Djangoサーバー上の2匹のAIがヘビを自動操作します</div>
 
   <div class="scoreboard">
-    <div>スコア: <b id="score">0</b></div>
-    <div>長さ: <b id="length">0</b></div>
+    <div class="snake-stat s1" id="stat0"><span class="dot"></span>S1 スコア: <b id="score0">0</b> 長さ: <b id="length0">0</b></div>
+    <div class="snake-stat s2" id="stat1"><span class="dot"></span>S2 スコア: <b id="score1">0</b> 長さ: <b id="length1">0</b></div>
     <div>手数: <b id="steps">0</b></div>
     <div>ハイスコア: <b id="highScore">0</b></div>
   </div>
@@ -179,12 +198,30 @@
 
   <div class="controls">
     <div class="mode">
-      AI
-      <select id="strategySelect">
+      モード
+      <select id="modeSelect">
+        <option value="battle" selected>2匹で対戦</option>
+        <option value="solo">1匹で操作</option>
+      </select>
+    </div>
+    <div class="mode s1">
+      <span id="s1Label">S1 AI</span>
+      <select id="strategySelect0">
         <option value="search">探索AI (BFS)</option>
         <option value="rl">学習済みAI (features/MLP)</option>
         <option value="rl_cnn">学習済みAI (ego/CNN)</option>
         <option value="rl_trf">学習済みAI (ego/Transformer)</option>
+        <option value="rl_trf_battle">学習済みAI (ego/Transformer 対戦特化)</option>
+      </select>
+    </div>
+    <div class="mode s2" id="s2Controls">
+      S2 AI
+      <select id="strategySelect1">
+        <option value="search" selected>探索AI (BFS)</option>
+        <option value="rl">学習済みAI (features/MLP)</option>
+        <option value="rl_cnn">学習済みAI (ego/CNN)</option>
+        <option value="rl_trf">学習済みAI (ego/Transformer)</option>
+        <option value="rl_trf_battle">学習済みAI (ego/Transformer 対戦特化)</option>
       </select>
     </div>
     <div class="mode">
@@ -211,8 +248,9 @@
     (function () {
       const canvas = document.getElementById('board');
       const ctx = canvas.getContext('2d');
-      const scoreEl = document.getElementById('score');
-      const lengthEl = document.getElementById('length');
+      const scoreEls = [document.getElementById('score0'), document.getElementById('score1')];
+      const lengthEls = [document.getElementById('length0'), document.getElementById('length1')];
+      const statEls = [document.getElementById('stat0'), document.getElementById('stat1')];
       const stepsEl = document.getElementById('steps');
       const highScoreEl = document.getElementById('highScore');
       const overlay = document.getElementById('overlay');
@@ -222,9 +260,22 @@
       const pauseBtn = document.getElementById('pauseBtn');
       const restartBtn = document.getElementById('restartBtn');
       const speedRange = document.getElementById('speedRange');
-      const strategySelect = document.getElementById('strategySelect');
+      const strategySelects = [
+        document.getElementById('strategySelect0'),
+        document.getElementById('strategySelect1'),
+      ];
       const gridSelect = document.getElementById('gridSelect');
       const statusEl = document.getElementById('status');
+      const modeSelect = document.getElementById('modeSelect');
+      const s2Controls = document.getElementById('s2Controls');
+      const s1Label = document.getElementById('s1Label');
+      const subtitleEl = document.getElementById('subtitle');
+
+      // Colors for snake 0 (head/body) and snake 1 (head/body).
+      const SNAKE_COLORS = [
+        ['#4ade80', '#22c55e'],
+        ['#38bdf8', '#0ea5e9'],
+      ];
 
       let gameId = null;
       let state = null;
@@ -236,7 +287,7 @@
       let socket = null; // WebSocket carrying the per-step traffic
 
       // High scores are kept per board size (a 10x10 score and a 40x40 score
-      // are not comparable).
+      // are not comparable). The value stored is the best of either snake.
       function highKey(grid) { return 'aiSnakeHighScore_' + grid; }
       function loadHighScore(grid) {
         return Number(localStorage.getItem(highKey(grid)) || 0);
@@ -248,9 +299,27 @@
       // grid is the board size a model requires (null = any size).
       let strategyMeta = {};
       const baseLabels = {};
-      strategySelect.querySelectorAll('option').forEach((o) => {
+      strategySelects[0].querySelectorAll('option').forEach((o) => {
         baseLabels[o.value] = o.textContent;
       });
+
+      // 1 snake ("solo") or 2 ("battle"); the server mirrors whichever count
+      // of strategies it's sent, so this is the only place that decides it.
+      function isSolo() { return modeSelect.value === 'solo'; }
+      function activeStrategies() {
+        return isSolo() ? [strategySelects[0].value] : strategySelects.map((s) => s.value);
+      }
+
+      function applyMode() {
+        const solo = isSolo();
+        s2Controls.classList.toggle('hidden', solo);
+        statEls[1].classList.toggle('hidden', solo);
+        s1Label.textContent = solo ? 'AI' : 'S1 AI';
+        subtitleEl.textContent = solo
+          ? 'Djangoサーバー上のAIがヘビを自動操作します'
+          : 'Djangoサーバー上の2匹のAIがヘビを自動操作します';
+      }
+      applyMode();
 
       async function api(path, body) {
         const res = await fetch(path, {
@@ -299,8 +368,15 @@
       function applyState(s) {
         state = s;
         CELL = canvas.width / s.grid;
-        scoreEl.textContent = s.score;
-        lengthEl.textContent = s.length;
+        // Clear stale "dead" styling first: a solo game only touches
+        // statEls[0] below, so a previous battle's statEls[1] wouldn't
+        // otherwise be reset.
+        statEls.forEach((el) => el.classList.remove('dead'));
+        s.snakes.forEach((snake, i) => {
+          scoreEls[i].textContent = snake.score;
+          lengthEls[i].textContent = snake.length;
+          statEls[i].classList.toggle('dead', !snake.alive);
+        });
         stepsEl.textContent = s.steps;
         draw();
       }
@@ -314,15 +390,17 @@
 
       function applyStrategyMeta(meta) {
         strategyMeta = meta || {};
-        Object.entries(strategyMeta).forEach(([value, m]) => {
-          const opt = strategySelect.querySelector('option[value="' + value + '"]');
-          if (!opt) return;
-          opt.disabled = !m.available;
-          opt.textContent = baseLabels[value] + (m.available ? '' : ' — 利用不可');
+        strategySelects.forEach((select) => {
+          Object.entries(strategyMeta).forEach(([value, m]) => {
+            const opt = select.querySelector('option[value="' + value + '"]');
+            if (!opt) return;
+            opt.disabled = !m.available;
+            opt.textContent = baseLabels[value] + (m.available ? '' : ' — 利用不可');
+          });
+          // If the current selection became unavailable, revert to search.
+          const cur = strategyMeta[select.value];
+          if (cur && !cur.available) select.value = 'search';
         });
-        // If the current selection became unavailable, revert to search.
-        const cur = strategyMeta[strategySelect.value];
-        if (cur && !cur.available) strategySelect.value = 'search';
       }
 
       async function newGame() {
@@ -332,7 +410,7 @@
           socket = null;
         }
         const data = await api('/api/new/', {
-          strategy: strategySelect.value,
+          strategies: activeStrategies(),
           grid: Number(gridSelect.value),
         });
         gameId = data.game_id;
@@ -376,8 +454,16 @@
           statusEl.textContent = '通信エラー: WebSocketが接続されていません';
           return;
         }
-        socket.send(JSON.stringify({ strategy: strategySelect.value }));
+        socket.send(JSON.stringify({ strategies: activeStrategies() }));
       }
+
+      const STRATEGY_LABELS = {
+        search: '探索AI(BFS)',
+        rl: '学習済みAI(MLP)',
+        rl_cnn: '学習済みAI(CNN)',
+        rl_trf: '学習済みAI(Transformer)',
+        rl_trf_battle: '学習済みAI(Transformer対戦)',
+      };
 
       function handleStepMessage(data) {
         if (data.error) {
@@ -386,16 +472,15 @@
           return;
         }
         applyState(data.state);
-        const labels = {
-          search: '探索AI(BFS)',
-          rl: '学習済みAI(MLP)',
-          rl_cnn: '学習済みAI(CNN)',
-          rl_trf: '学習済みAI(Transformer)',
-        };
-        const label = labels[data.strategy] || data.strategy;
-        statusEl.innerHTML =
-          label + ' の選択: <span class="dir">' + data.direction +
-          '</span>　（盤面 ' + state.grid + '×' + state.grid + '）';
+
+        const solo = data.state.snakes.length === 1;
+        statusEl.innerHTML = data.state.snakes.map((snake, i) => {
+          const tag = solo ? '' : 'S' + (i + 1) + ': ';
+          if (!snake.alive) return tag + '死亡';
+          const label = STRATEGY_LABELS[data.strategies[i]] || data.strategies[i];
+          return tag + label + ' → <span class="dir s' + (i + 1) + '">' +
+            data.directions[i] + '</span>';
+        }).join('　｜　') + '　（盤面 ' + state.grid + '×' + state.grid + '）';
 
         if (data.state.game_over) {
           return endGame();
@@ -410,19 +495,38 @@
           socket = null;
         }
         pauseBtn.disabled = true;
-        if (state.score > highScore) {
-          highScore = state.score;
+
+        const snakes = state.snakes;
+        const bestScore = Math.max(...snakes.map((s) => s.score));
+        if (bestScore > highScore) {
+          highScore = bestScore;
           localStorage.setItem(highKey(state.grid), highScore);
           highScoreEl.textContent = highScore;
         }
-        const won = state.length >= state.grid * state.grid;
-        overlayTitle.textContent = won
-          ? 'AIクリア！ 🎉'
-          : (state.stalled ? '行き詰まり（タイムアウト）' : 'ゲームオーバー');
-        overlayText.innerHTML =
-          'スコア: <b>' + state.score + '</b>　長さ: <b>' + state.length +
-          '</b><br>手数: <b>' + state.steps + '</b>' +
-          (state.stalled ? '<br><small>エサに辿り着けないまま時間切れになりました</small>' : '');
+
+        // The board only runs out of food once every cell is a snake body,
+        // i.e. the snake(s) together "cleared" it.
+        const won = state.food === null;
+        const solo = snakes.length === 1;
+        let title;
+        if (won) {
+          title = 'AIクリア！ 🎉';
+        } else if (solo) {
+          title = snakes[0].stalled ? '行き詰まり（タイムアウト）' : 'ゲームオーバー';
+        } else if (snakes[0].score === snakes[1].score) {
+          title = '引き分け';
+        } else {
+          const winner = snakes[0].score > snakes[1].score ? 1 : 2;
+          title = 'スネーク' + winner + ' の勝利！';
+        }
+        overlayTitle.textContent = title;
+
+        overlayText.innerHTML = snakes.map((s, i) => {
+          const tag = solo ? '' : 'S' + (i + 1) + ': ';
+          const reason = s.alive ? '' : (s.stalled ? '（行き詰まり）' : '（死亡）');
+          return tag + 'スコア <b>' + s.score + '</b>　長さ <b>' + s.length + '</b> ' + reason;
+        }).join('<br>') + '<br>手数: <b>' + state.steps + '</b>';
+
         startBtn.textContent = 'もう一度';
         overlay.classList.remove('hidden');
         statusEl.textContent = '';
@@ -449,12 +553,17 @@
           ctx.moveTo(0, i * CELL); ctx.lineTo(canvas.width, i * CELL); ctx.stroke();
         }
 
-        // Food
-        drawCircle(state.food[0], state.food[1], '#f43f5e');
+        // Food (absent once the board is completely full).
+        if (state.food) {
+          drawCircle(state.food[0], state.food[1], '#f43f5e');
+        }
 
-        // Snake
-        state.snake.forEach((seg, i) => {
-          drawRect(seg[0], seg[1], i === 0 ? '#4ade80' : '#22c55e');
+        // Snakes (a dead snake's body is already empty server-side).
+        state.snakes.forEach((snake, i) => {
+          const [headColor, bodyColor] = SNAKE_COLORS[i] || SNAKE_COLORS[0];
+          snake.snake.forEach((seg, j) => {
+            drawRect(seg[0], seg[1], j === 0 ? headColor : bodyColor);
+          });
         });
       }
 
@@ -487,13 +596,23 @@
       });
       stepDelay = 330 - Number(speedRange.value);
 
-      // Changing the AI mid-game: if the new AI needs a different board size,
+      // Switching between solo and battle changes the number of snakes, so it
+      // always starts a fresh game (a running one, or just to refresh the
+      // idle board once a game exists).
+      modeSelect.addEventListener('change', () => {
+        applyMode();
+        if (running || gameId) newGame();
+      });
+
+      // Changing an AI mid-game: if the new AI needs a different board size,
       // restart on the right board. Otherwise the switch is live and takes
       // effect on the next tick. (All current AIs run on any size.)
-      strategySelect.addEventListener('change', () => {
-        if (running && state && !fitsBoard(strategySelect.value, state.grid)) {
-          newGame();
-        }
+      strategySelects.forEach((select) => {
+        select.addEventListener('change', () => {
+          if (running && state && !fitsBoard(select.value, state.grid)) {
+            newGame();
+          }
+        });
       });
 
       // The board size is authoritative on the server, so changing it starts a
