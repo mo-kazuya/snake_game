@@ -322,6 +322,27 @@ class RLAgentTests(TestCase):
         self.assertIsNone(rl_agent.required_grid("rl_cnn"))
         self.assertIsNone(rl_agent.required_grid("rl_trf"))
         self.assertIsNone(rl_agent.required_grid("rl_trf_battle"))
+        self.assertIsNone(rl_agent.required_grid("rl_trf_aggr"))
+        self.assertIsNone(rl_agent.required_grid("rl_trf_def"))
+
+    def test_style_transformers_are_registered(self):
+        # The aggressive / defensive playstyle models are first-class RL
+        # strategies with their own labels and availability flags.
+        meta = rl_agent.strategies_meta()
+        for name, kw in (("rl_trf_aggr", "攻撃"), ("rl_trf_def", "防御")):
+            self.assertIn(name, rl_agent.MODEL_NAMES)
+            self.assertIn(name, meta)
+            self.assertIn(kw, meta[name]["label"])
+            self.assertIsNone(meta[name]["grid"])
+            self.assertEqual(meta[name]["available"], rl_agent.is_available(name))
+
+    def test_style_transformers_fall_back_when_unavailable(self):
+        s = GameState(grid=20, snakes=[Snake(body=[(10, 10), (9, 10), (8, 10)], direction="right")])
+        for name in ("rl_trf_aggr", "rl_trf_def"):
+            direction, used = ai.choose(s, 0, strategy=name)
+            expected = name if rl_agent.is_available(name) else "search"
+            self.assertEqual(used, expected)
+            self.assertIn(direction, ("up", "down", "left", "right"))
 
     def test_battle_transformer_is_registered(self):
         # The battle-tuned Transformer is a first-class RL strategy and shows up
