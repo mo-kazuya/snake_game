@@ -137,6 +137,11 @@ python examples/train_transformer_battle.py \
     --opponents search,model:examples/ppo_snake_transformer_battle.zip
 ```
 
+**LoRA での代替レシピ**: ベースを凍結し低ランクアダプタだけを学習してマージする
+ドロップイン版が [`examples/train_transformer_lora.py`](../examples/train_transformer_lora.py)
+です。ベースは明確に上回りますが、本モデル（約0.88M・注意機構を凍結）ではフルBCに一歩
+及びません。詳細な比較は [`examples/TRAINING_RESULTS.md`](../examples/TRAINING_RESULTS.md) 参照。
+
 ## テスト
 
 ```bash
