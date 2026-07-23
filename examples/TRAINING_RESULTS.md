@@ -745,3 +745,48 @@ python examples/train_transformer_style.py --style aggressive
 python examples/train_transformer_style.py --style defensive
 python examples/train_transformer_style.py --style balanced
 ```
+
+---
+
+## 深い残差CNN（`ResidualGridCNN`）— 実装と正直な比較
+
+ego/CNN をさらに強化できないか、**層を深くし ResNet 的な残差接続**を入れた
+`ResidualGridCNN`（[`gym_snake/policies.py`](../gym_snake/policies.py)）を追加しました。
+
+### 構成
+
+- conv **stem**（GroupNorm+ReLU）＋ `n_blocks` 個の残差ブロック（各ブロックは
+  stride1・3×3 conv を2つ、それぞれ GroupNorm を挟み、恒等スキップを最後の ReLU 直前に加算:
+  `out = relu(x + gn2(conv2(relu(gn1(conv1(x))))))`）。既定 4 ブロックで **conv 9層**
+  （SmallGridCNN の 2層に対して）。
+- **BatchNorm ではなく GroupNorm** を採用。PPO は小さく相関の強いロールアウトを流し、
+  train/eval を頻繁に切り替えるため BatchNorm の移動統計が壊れます。GroupNorm はサンプル毎に
+  正規化し両モードで同一挙動です。
+- 全 conv が stride1・pad1 で盤面サイズを保持するため、固定形状の ego 観測では **サイズ非依存**。
+- 学習: `python examples/train_sb3.py --obs ego --arch residual --res-blocks 4 --res-width 64`
+
+### 正直な比較（同一 ego デモ・CE主体 BC・スクラッチ学習）
+
+浅い `SmallGridCNN`（2層）と深い `ResidualGridCNN`（9層）を同じ探索AIデモで模倣学習し、
+単独プレイの平均エサ（10/14/20盤面）で比較しました。
+
+| モデル | conv層 | パラメータ | 到達 val acc | 平均エサ | エポック |
+|------|----:|--------:|--------:|------:|----:|
+| SmallGridCNN | 2 | 2.04M | **0.886** | **29.1** | 8 |
+| ResidualGridCNN | 9 | 2.32M | 0.852 | 16.1 | 16 |
+
+**結論: この小タスクでは深い残差CNNは浅いCNNを上回りませんでした。** 残差CNNは
+毎エポック約6倍遅いうえ収束も遅く（val acc 0.68→0.85 と16エポックかけて上昇）、
+**2倍のエポックを与えても** 浅いCNN（8エポックで0.886）に届かず、プレイ性能（平均エサ）は
+約半分でした。
+
+- **なぜか**: ego 観測は 11×11 と小さく、「正面の危険」「頭と首の向き」等の判断は 2層の
+  畳み込みで十分に表現できます。タスクが要求しない容量を足すと、**スクラッチ最適化が難しく
+  なるだけ**で精度は上がりません（残差接続自体は正しく機能——6ブロックを貫通して stem まで
+  非ゼロ勾配が届くことをテストで確認済み: `test_residual_block_is_identity_at_init_of_last_layer`）。
+- 残差CNNが活きる可能性があるのは、**より大きな入力・難しいタスク**や、BC ではなく**十分な
+  ステップの PPO 学習**（本リポジトリの CPU では非現実的なので GPU 推奨）です。アーキテクチャと
+  学習経路（`--arch residual`）は用意したので、そうした設定で試せます。
+
+そのため**同梱の `rl_cnn`（ego/CNN）は引き続き PPO 学習済みの `SmallGridCNN`** のままとし、
+残差CNNは実験用の選択肢として提供します。
