@@ -71,6 +71,8 @@
 | 学習済みAI (ego/CNN) | `game/rl_agent.py` + `examples/ppo_snake_ego.zip` | 任意（既定 20×20） |
 | 学習済みAI (ego/Transformer) | `game/rl_agent.py` + `examples/ppo_snake_transformer.zip` | 任意（既定 20×20） |
 | 学習済みAI (ego/Transformer 対戦特化) | `game/rl_agent.py` + `examples/ppo_snake_transformer_battle.zip` | 任意（既定 20×20） |
+| 学習済みAI (Transformer 攻撃型) | `game/rl_agent.py` + `examples/ppo_snake_transformer_aggr.zip` | 任意（既定 20×20） |
+| 学習済みAI (Transformer 防御型) | `game/rl_agent.py` + `examples/ppo_snake_transformer_def.zip` | 任意（既定 20×20） |
 
 ### 1. 探索AI (BFS) — `game/ai.py`
 
@@ -118,6 +120,14 @@
   軽量版**です。ベースの単独版との直接対戦48ゲームで**勝率48%対27%（約1.8倍）**と、対戦特化の
   効果が確認できています（エサの荒稼ぎは僅かに減る一方、競り合いに強くなり「勝つ」方向へ調整）。
   さらに強くするには、GPUで対戦BC＋対戦PPO（勝率ゲート）まで回す完全版レシピを使ってください。
+- **Transformer 攻撃型 / 防御型** … **同じベースTransformerに LoRA アダプタだけを差し替えて
+  “性格” を出した**2モデルです（`examples/train_transformer_style.py`）。性格を付けた探索AI教師
+  （`examples/style_experts.py`）の対戦プレイを、注意機構まで含む LoRA（14.8%のパラメータ）で
+  BC模倣し、ベースへマージした軽量ドロップインです。
+  - **攻撃型**は共有エサを積極的に競り、相手の頭付近に密着して空間を狭めます。
+  - **防御型**は競り合うエサを譲り、相手から距離を取って開けた場所で長く生き延びます。
+  - 実測（vs探索AI・20戦）で個性がはっきり分かれます: 相手との平均距離 **攻撃4.1 / 防御7.1**、
+    生存長 **攻撃49 / 防御72**、直接対戦は攻撃が58%勝ち。詳細は `examples/TRAINING_RESULTS.md`。
 - **依存の無い環境でも安全**: `stable-baselines3`/`torch`（CNN/Transformerは加えて `gym_snake`）が未インストール、
   またはモデルファイルが無い場合は自動的に探索AIへフォールバックし、フロント側では該当オプションが
   選択不可になります。
