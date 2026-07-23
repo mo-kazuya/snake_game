@@ -73,6 +73,7 @@
 | 学習済みAI (ego/Transformer 対戦特化) | `game/rl_agent.py` + `examples/ppo_snake_transformer_battle.zip` | 任意（既定 20×20） |
 | 学習済みAI (Transformer 攻撃型) | `game/rl_agent.py` + `examples/ppo_snake_transformer_aggr.zip` | 任意（既定 20×20） |
 | 学習済みAI (Transformer 防御型) | `game/rl_agent.py` + `examples/ppo_snake_transformer_def.zip` | 任意（既定 20×20） |
+| 学習済みAI (Transformer バランス型) | `game/rl_agent.py` + `examples/ppo_snake_transformer_bal.zip` | 任意（既定 20×20） |
 
 ### 1. 探索AI (BFS) — `game/ai.py`
 
@@ -126,8 +127,11 @@
   BC模倣し、ベースへマージした軽量ドロップインです。
   - **攻撃型**は共有エサを積極的に競り、相手の頭付近に密着して空間を狭めます。
   - **防御型**は競り合うエサを譲り、相手から距離を取って開けた場所で長く生き延びます。
-  - 実測（vs探索AI・20戦）で個性がはっきり分かれます: 相手との平均距離 **攻撃4.1 / 防御7.1**、
-    生存長 **攻撃49 / 防御72**、直接対戦は攻撃が58%勝ち。詳細は `examples/TRAINING_RESULTS.md`。
+  - **バランス型**はベース探索AIの中立な判断をLoRAで写した中間タイプです。
+  - 実測（vs探索AI・20戦）で個性がはっきり分かれます: エサ **攻撃3.6 / バランス2.9 / 防御1.9**、
+    勝率 **45% / 30% / 10%**（攻撃度が単調に並ぶ）、相手との平均距離 **攻撃4.1 / 防御7.1**、
+    生存長 **攻撃49 / 防御72**。攻撃 vs 防御の直接対戦は攻撃が58%勝ち。詳細は
+    `examples/TRAINING_RESULTS.md`。
 - **依存の無い環境でも安全**: `stable-baselines3`/`torch`（CNN/Transformerは加えて `gym_snake`）が未インストール、
   またはモデルファイルが無い場合は自動的に探索AIへフォールバックし、フロント側では該当オプションが
   選択不可になります。
