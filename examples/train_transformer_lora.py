@@ -19,13 +19,15 @@ Why LoRA here (and the honest caveats):
   the bottleneck is the Transformer *forward* pass, which LoRA doesn't reduce.
 
 Coverage: LoRA is injected into the encoder FFN (``linear1``/``linear2``), the
-feature head, and the SB3 policy/value MLPs and action/value heads. The whole
-``self_attn`` block is left frozen: its q/k/v is a packed ``in_proj_weight``
-(not an ``nn.Linear``), and its ``out_proj`` -- although an ``nn.Linear`` -- is
-consumed by ``nn.MultiheadAttention`` through the fused functional path that
-reads ``out_proj.weight``/``.bias`` as raw attributes, so wrapping it as a
-module would break attention. The FFN carries the bulk of each encoder block's
-linear params, so the adapters live there plus the heads.
+feature head, the SB3 policy/value MLPs and action/value heads, **and the
+self-attention** (on by default; ``--no-attn`` disables it). Attention needs a
+**custom adapter** (:func:`inject_attn_lora` / ``AttnLoRA``) because its q/k/v is
+a packed ``in_proj_weight`` (not an ``nn.Linear``) and its ``out_proj`` is
+consumed through ``nn.MultiheadAttention``'s fused functional path -- neither is
+reachable by wrapping a sub-``nn.Linear``. ``AttnLoRA`` freezes the attention
+module and re-runs ``F.multi_head_attention_forward`` with LoRA-augmented q/k/v
+and output projections instead. Plain ``nn.Linear`` layers use the simpler
+``LoRALinear`` wrapper. Both merge into a clean checkpoint at the end.
 
 Run:
 
@@ -50,15 +52,14 @@ import numpy as np
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-# Linear layers to adapt (matched by module-name suffix).
+# Plain ``nn.Linear`` layers to adapt with LoRALinear (matched by name suffix).
 #
-# Excluded on purpose: the whole ``self_attn`` block. Its q/k/v is a packed
-# ``in_proj_weight`` (not an nn.Linear), and its ``out_proj``, although an
-# nn.Linear, is consumed by ``nn.MultiheadAttention`` via the fused functional
-# path that reads ``out_proj.weight``/``.bias`` as raw attributes rather than
-# calling it as a module -- so replacing it with a wrapper breaks attention.
-# The FFN (linear1/linear2) carries the bulk of each encoder block's linear
-# params and is fully adaptable, so the adapters live there plus the heads.
+# The ``self_attn`` block is handled separately by :func:`inject_attn_lora`
+# (AttnLoRA), NOT here: its q/k/v is a packed ``in_proj_weight`` (not an
+# nn.Linear), and its ``out_proj`` is consumed by ``nn.MultiheadAttention`` via
+# the fused functional path -- so neither can be adapted by wrapping a sub-Linear.
+# What remains here is the encoder FFN (linear1/linear2), the feature head and
+# the SB3 policy/value MLPs and heads.
 TARGET_SUFFIXES = (
     "linear1", "linear2",                          # encoder FFN
     "features_extractor.head.0",                   # feature head
@@ -123,7 +124,133 @@ def _make_lora_linear_cls():
         def merged_weight(self):
             return (self.base.weight + (self.lora_B @ self.lora_A) * self.scaling).detach()
 
+        def lora_params(self):
+            return [self.lora_A, self.lora_B]
+
+        @torch.no_grad()
+        def merge_into(self, target: "nn.Linear") -> None:
+            """Write the merged weight into the matching plain ``nn.Linear`` of a
+            clean (base-structured) checkpoint."""
+            target.weight.data.copy_(self.merged_weight().to(target.weight.device))
+
     return LoRALinear
+
+
+def _make_attn_lora_cls():
+    """Build the AttnLoRA class lazily (wraps ``nn.MultiheadAttention``).
+
+    ``nn.MultiheadAttention`` keeps its q/k/v as a **packed** ``in_proj_weight``
+    parameter (not an ``nn.Linear``) and runs through ``F.multi_head_attention_forward``
+    on the functional path, so it can't be adapted by wrapping a sub-``nn.Linear``.
+    This wrapper instead **freezes the whole attention module** and adds low-rank
+    adapters on both projections directly:
+
+    * ``in_proj`` — one adapter on the packed ``(3·d, d)`` q/k/v matrix (covers q,
+      k and v jointly),
+    * ``out_proj`` — one adapter on the ``(d, d)`` output projection.
+
+    ``forward`` re-runs ``F.multi_head_attention_forward`` with the LoRA-augmented
+    weights (``W + scaling·B·A``), matching how ``nn.TransformerEncoderLayer``
+    invokes self-attention (self-attn, ``need_weights=False``, ``batch_first``).
+    Both ``B`` matrices start at zero so the adapter is a no-op at init.
+    """
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    class AttnLoRA(nn.Module):
+        def __init__(self, mha: nn.MultiheadAttention, r: int, alpha: int):
+            super().__init__()
+            self.mha = mha
+            for p in self.mha.parameters():
+                p.requires_grad_(False)
+            d = mha.embed_dim
+            self.r = r
+            self.scaling = alpha / r
+            self.in_A = nn.Parameter(torch.zeros(r, d))
+            self.in_B = nn.Parameter(torch.zeros(3 * d, r))
+            self.out_A = nn.Parameter(torch.zeros(r, d))
+            self.out_B = nn.Parameter(torch.zeros(d, r))
+            nn.init.kaiming_uniform_(self.in_A, a=math.sqrt(5))
+            nn.init.kaiming_uniform_(self.out_A, a=math.sqrt(5))
+
+        def __getattr__(self, name):
+            # nn.TransformerEncoder / EncoderLayer read attributes straight off
+            # ``self_attn`` (batch_first, num_heads, in_proj_weight, out_proj, ...)
+            # when deciding their fast path. Delegate anything we don't define
+            # ourselves to the wrapped module so the wrapper is a transparent
+            # stand-in for nn.MultiheadAttention.
+            try:
+                return super().__getattr__(name)
+            except AttributeError:
+                mha = self._modules.get("mha")
+                if mha is not None and hasattr(mha, name):
+                    return getattr(mha, name)
+                raise
+
+        def eff_in_proj_weight(self):
+            return self.mha.in_proj_weight + (self.in_B @ self.in_A) * self.scaling
+
+        def eff_out_proj_weight(self):
+            return self.mha.out_proj.weight + (self.out_B @ self.out_A) * self.scaling
+
+        def forward(self, query, key, value, key_padding_mask=None,
+                    need_weights=False, attn_mask=None, average_attn_weights=True,
+                    is_causal=False):
+            mha = self.mha
+            is_batched = query.dim() == 3
+            if mha.batch_first and is_batched:
+                query, key, value = (x.transpose(1, 0) for x in (query, key, value))
+            attn_output, attn_weights = F.multi_head_attention_forward(
+                query, key, value, mha.embed_dim, mha.num_heads,
+                self.eff_in_proj_weight(), mha.in_proj_bias,
+                mha.bias_k, mha.bias_v, mha.add_zero_attn,
+                mha.dropout, self.eff_out_proj_weight(), mha.out_proj.bias,
+                training=mha.training, key_padding_mask=key_padding_mask,
+                need_weights=need_weights, attn_mask=attn_mask,
+                average_attn_weights=average_attn_weights, is_causal=is_causal,
+            )
+            if mha.batch_first and is_batched:
+                attn_output = attn_output.transpose(1, 0)
+            return attn_output, attn_weights
+
+        def lora_params(self):
+            return [self.in_A, self.in_B, self.out_A, self.out_B]
+
+        @torch.no_grad()
+        def merge_into(self, target: nn.MultiheadAttention) -> None:
+            target.in_proj_weight.data.copy_(
+                self.eff_in_proj_weight().to(target.in_proj_weight.device))
+            target.out_proj.weight.data.copy_(
+                self.eff_out_proj_weight().to(target.out_proj.weight.device))
+
+    return AttnLoRA
+
+
+def inject_attn_lora(policy, r: int, alpha: int):
+    """Wrap every ``nn.MultiheadAttention`` in ``policy`` with AttnLoRA.
+
+    Returns a dict mapping the attention module's dotted name (e.g.
+    ``features_extractor.encoder.layers.0.self_attn``) to its AttnLoRA, so
+    :func:`merge_to_clean_checkpoint` can write the merged projections back into
+    a clean checkpoint by the same name.
+    """
+    import torch.nn as nn
+
+    AttnLoRA = _make_attn_lora_cls()
+
+    targets = [
+        (name, mod) for name, mod in policy.named_modules()
+        if isinstance(mod, nn.MultiheadAttention)
+    ]
+    attn_modules: dict[str, object] = {}
+    for name, mod in targets:
+        parent = policy.get_submodule(name.rsplit(".", 1)[0]) if "." in name else policy
+        attr = name.rsplit(".", 1)[-1]
+        wrapped = AttnLoRA(mod, r, alpha).to(mod.in_proj_weight.device)
+        setattr(parent, attr, wrapped)
+        attn_modules[name] = wrapped
+    return attn_modules
 
 
 def inject_lora(policy, target_suffixes, r: int, alpha: int):
@@ -177,8 +304,8 @@ def lora_bc(model, lora_modules, data_path: Path, epochs: int,
 
     policy = model.policy
     policy.set_training_mode(True)
-    # Only LoRA params train.
-    lora_params = [p for m in lora_modules.values() for p in (m.lora_A, m.lora_B)]
+    # Only LoRA params train (works for both LoRALinear and AttnLoRA).
+    lora_params = [p for m in lora_modules.values() for p in m.lora_params()]
     trainable = sum(p.numel() for p in lora_params)
     total = sum(p.numel() for p in policy.parameters())
     print(f"[lora] trainable adapters: {trainable:,} / {total:,} params "
@@ -237,11 +364,12 @@ def lora_bc(model, lora_modules, data_path: Path, epochs: int,
 def merge_to_clean_checkpoint(base_path: Path, lora_modules, device, out: Path):
     """Write LoRA-merged weights into a *fresh* base-structured checkpoint.
 
-    The trained policy still has ``LoRALinear`` wrappers in it; rather than
-    surgically unwrap them, we reload a clean base model (plain ``EgoTransformer``
-    structure) and overwrite each targeted linear's weight with the merged
-    ``W + scaling·B·A``. Everything else is unchanged (base was frozen), so the
-    result is byte-compatible with the Django adapter's ``PPO.load``.
+    The trained policy still has ``LoRALinear`` / ``AttnLoRA`` wrappers in it;
+    rather than surgically unwrap them, we reload a clean base model (plain
+    ``EgoTransformer`` structure) and let each wrapper write its merged
+    ``W + scaling·B·A`` into the matching clean submodule (``merge_into``).
+    Everything else is unchanged (base was frozen), so the result is
+    byte-compatible with the Django adapter's ``PPO.load``.
     """
     from stable_baselines3 import PPO
 
@@ -249,8 +377,7 @@ def merge_to_clean_checkpoint(base_path: Path, lora_modules, device, out: Path):
 
     clean = PPO.load(str(base_path), device=device)
     for name, lm in lora_modules.items():
-        target = clean.policy.get_submodule(name)  # plain nn.Linear in the clean model
-        target.weight.data.copy_(lm.merged_weight().to(target.weight.device))
+        lm.merge_into(clean.policy.get_submodule(name))
     clean.save(str(out))
     return clean
 
@@ -267,6 +394,9 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--r", type=int, default=8, help="LoRA rank")
     parser.add_argument("--alpha", type=int, default=16, help="LoRA scaling alpha")
+    parser.add_argument("--no-attn", action="store_true",
+                        help="skip the custom attention (qkv + out_proj) adapters "
+                             "and adapt only the FFN + heads")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch", type=int, default=1024)
     parser.add_argument("--lr", type=float, default=5e-4)
@@ -296,6 +426,11 @@ def main() -> None:
 
     model = PPO.load(str(args.init), device=device)
     lora_modules = inject_lora(model.policy, TARGET_SUFFIXES, args.r, args.alpha)
+    if not args.no_attn:
+        lora_modules.update(inject_attn_lora(model.policy, args.r, args.alpha))
+        print(f"[setup] attention adapters on "
+              f"{sum(1 for k in lora_modules if k.endswith('self_attn'))} MHA blocks",
+              flush=True)
 
     # -- train LoRA + merge -------------------------------------------------
     lora_bc(model, lora_modules, data_path, args.epochs, args.batch, args.lr, device)

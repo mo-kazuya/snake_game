@@ -94,6 +94,35 @@ _MODELS = {
         "label": "学習済みAI (ego/Transformer 対戦特化)",
         "needs_gym_snake": True,
     },
+    "rl_trf_aggr": {
+        # Same base EgoTransformer, but a LoRA adapter behavior-cloned from an
+        # *aggressive* expert (contests the shared food and crowds the
+        # opponent), then merged in -- see examples/train_transformer_style.py.
+        "file": _EXAMPLES / "ppo_snake_transformer_aggr.zip",
+        "obs": "ego",
+        "grid": None,
+        "label": "学習済みAI (Transformer 攻撃型)",
+        "needs_gym_snake": True,
+    },
+    "rl_trf_def": {
+        # Same base EgoTransformer with a LoRA adapter cloned from a *defensive*
+        # expert (yields contested food, keeps distance and survives longer).
+        "file": _EXAMPLES / "ppo_snake_transformer_def.zip",
+        "obs": "ego",
+        "grid": None,
+        "label": "学習済みAI (Transformer 防御型)",
+        "needs_gym_snake": True,
+    },
+    "rl_trf_bal": {
+        # Neutral middle style: a LoRA adapter cloned from the *balanced* expert
+        # (the base search AI's own ranking), so the three playstyle models
+        # share one base and differ only by the demonstrator's personality.
+        "file": _EXAMPLES / "ppo_snake_transformer_bal.zip",
+        "obs": "ego",
+        "grid": None,
+        "label": "学習済みAI (Transformer バランス型)",
+        "needs_gym_snake": True,
+    },
 }
 
 # Public set of RL strategy names for dispatchers (ai.choose, views).
