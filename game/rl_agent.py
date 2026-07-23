@@ -113,6 +113,16 @@ _MODELS = {
         "label": "学習済みAI (Transformer 防御型)",
         "needs_gym_snake": True,
     },
+    "rl_trf_bal": {
+        # Neutral middle style: a LoRA adapter cloned from the *balanced* expert
+        # (the base search AI's own ranking), so the three playstyle models
+        # share one base and differ only by the demonstrator's personality.
+        "file": _EXAMPLES / "ppo_snake_transformer_bal.zip",
+        "obs": "ego",
+        "grid": None,
+        "label": "学習済みAI (Transformer バランス型)",
+        "needs_gym_snake": True,
+    },
 }
 
 # Public set of RL strategy names for dispatchers (ai.choose, views).

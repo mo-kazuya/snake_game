@@ -10,6 +10,8 @@ per style, so a single base grows two personalities:
   in a risky race) and crowds the opponent's head to cut off its space.
 * ``defensive`` — yields contested food and repositions into open space away
   from the opponent, surviving longer.
+* ``balanced`` — the base search AI's own ranking (a neutral middle style),
+  cloned the same way so all three share one base + one LoRA slot.
 
 Because each merged checkpoint is a plain ``EgoTransformer`` (identical
 architecture), the Django adapter loads them through the same ``PPO.load`` path
@@ -170,7 +172,8 @@ def collect_dataset(total, workers, out_path, style, eps=0.1):
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--style", required=True, choices=["aggressive", "defensive"])
+    p.add_argument("--style", required=True,
+                   choices=["aggressive", "defensive", "balanced"])
     p.add_argument("--init", type=Path,
                    default=REPO / "examples" / "ppo_snake_transformer.zip")
     p.add_argument("--dataset", type=Path, default=None)
@@ -186,7 +189,8 @@ def main() -> None:
     p.add_argument("--work-dir", type=Path, default=Path("/tmp/snake_trf_style"))
     args = p.parse_args()
     args.work_dir.mkdir(parents=True, exist_ok=True)
-    out = args.out or (REPO / "examples" / f"ppo_snake_transformer_{args.style[:4]}.zip")
+    _short = {"aggressive": "aggr", "defensive": "def", "balanced": "bal"}[args.style]
+    out = args.out or (REPO / "examples" / f"ppo_snake_transformer_{_short}.zip")
 
     data_path = args.dataset
     if data_path is None or not data_path.exists():
