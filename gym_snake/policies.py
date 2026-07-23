@@ -58,6 +58,94 @@ def cnn_policy_kwargs(features_dim: int = 256) -> dict:
     )
 
 
+class _ResidualBlock(nn.Module):
+    """A pre-activation-free ResNet ``BasicBlock`` for tiny Snake boards.
+
+    Two stride-1 3x3 convolutions (padding keeps the board size) with a
+    ``GroupNorm`` after each, and an identity skip connection added before the
+    final ReLU: ``out = relu(x + gn2(conv2(relu(gn1(conv1(x))))))``. The block
+    keeps the channel count and spatial size fixed, so any number of them can be
+    stacked without changing the tensor shape.
+
+    ``GroupNorm`` (not ``BatchNorm``) is deliberate: PPO runs tiny, correlated
+    rollout batches and alternates train/eval, which wrecks BatchNorm's running
+    statistics; GroupNorm normalizes per-sample and behaves identically in both
+    modes.
+    """
+
+    def __init__(self, channels: int, groups: int = 8):
+        super().__init__()
+        g = groups if channels % groups == 0 else 1
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1)
+        self.gn1 = nn.GroupNorm(g, channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1)
+        self.gn2 = nn.GroupNorm(g, channels)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = torch.relu(self.gn1(self.conv1(x)))
+        y = self.gn2(self.conv2(y))
+        return torch.relu(x + y)
+
+
+class ResidualGridCNN(BaseFeaturesExtractor):
+    """A deeper, residual CNN for the (ego) grid observation.
+
+    Where :class:`SmallGridCNN` is two plain conv layers, this stacks a conv
+    **stem** and ``n_blocks`` :class:`_ResidualBlock`s (so ``2*n_blocks + 1``
+    conv layers in total) before flattening to ``features_dim``. The residual
+    skips let the network go much deeper without the vanishing-gradient /
+    optimization trouble a plain deep stack hits, exactly like a ResNet.
+
+    All convolutions are stride-1 with padding-1, so the spatial size is
+    preserved throughout and the flattened head has a fixed input size. On the
+    egocentric observation (fixed ``(5, 11, 11)`` shape) that makes this
+    extractor **board-size independent**, just like :class:`SmallGridCNN` on the
+    ego obs. Create the policy with ``normalize_images=False`` (obs is 0/1).
+    """
+
+    def __init__(
+        self,
+        observation_space: gym.spaces.Box,
+        features_dim: int = 256,
+        width: int = 64,
+        n_blocks: int = 4,
+        groups: int = 8,
+    ):
+        super().__init__(observation_space, features_dim)
+        n_input_channels = observation_space.shape[0]
+        self.stem = nn.Sequential(
+            nn.Conv2d(n_input_channels, width, kernel_size=3, stride=1, padding=1),
+            nn.GroupNorm(groups if width % groups == 0 else 1, width),
+            nn.ReLU(),
+        )
+        self.blocks = nn.Sequential(
+            *[_ResidualBlock(width, groups) for _ in range(n_blocks)]
+        )
+        # Infer the flattened size from a dummy forward pass.
+        with torch.no_grad():
+            sample = torch.zeros((1, *observation_space.shape), dtype=torch.float32)
+            n_flatten = self.blocks(self.stem(sample)).flatten(1).shape[1]
+        self.head = nn.Sequential(
+            nn.Flatten(), nn.Linear(n_flatten, features_dim), nn.ReLU()
+        )
+
+    def forward(self, observations: torch.Tensor) -> torch.Tensor:
+        return self.head(self.blocks(self.stem(observations)))
+
+
+def residual_policy_kwargs(
+    features_dim: int = 256, width: int = 64, n_blocks: int = 4, groups: int = 8
+) -> dict:
+    """policy_kwargs for a PPO ``CnnPolicy`` using :class:`ResidualGridCNN`."""
+    return dict(
+        features_extractor_class=ResidualGridCNN,
+        features_extractor_kwargs=dict(
+            features_dim=features_dim, width=width, n_blocks=n_blocks, groups=groups
+        ),
+        normalize_images=False,
+    )
+
+
 class AnyGridCNN(BaseFeaturesExtractor):
     """Board-size-independent CNN for the raw grid observation.
 

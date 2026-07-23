@@ -40,10 +40,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train PPO on gym_snake")
     parser.add_argument("--obs", choices=["features", "grid", "ego"], default="features")
     parser.add_argument(
-        "--arch", choices=["cnn", "transformer"], default="cnn",
-        help="feature extractor for image observations (ego/grid); "
-             "'transformer' is only supported with --obs ego",
+        "--arch", choices=["cnn", "residual", "transformer"], default="cnn",
+        help="feature extractor for image observations (ego/grid): 'cnn' is the "
+             "shallow SmallGridCNN, 'residual' the deeper ResNet-style "
+             "ResidualGridCNN, 'transformer' the ViT EgoTransformer (ego only)",
     )
+    parser.add_argument("--res-blocks", type=int, default=4,
+                        help="number of residual blocks for --arch residual")
+    parser.add_argument("--res-width", type=int, default=64,
+                        help="channel width for --arch residual")
     parser.add_argument("--grid", type=int, default=12)
     parser.add_argument("--timesteps", type=int, default=200_000)
     parser.add_argument("--n-envs", type=int, default=8)
@@ -92,6 +97,12 @@ def main() -> None:
 
             policy_kwargs = transformer_policy_kwargs(
                 d_model=64, num_layers=2, dim_feedforward=128, patch_size=2,
+            )
+        elif args.arch == "residual":
+            from gym_snake.policies import residual_policy_kwargs
+
+            policy_kwargs = residual_policy_kwargs(
+                width=args.res_width, n_blocks=args.res_blocks,
             )
         else:
             from gym_snake.policies import cnn_policy_kwargs
