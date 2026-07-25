@@ -288,8 +288,45 @@ def inject_lora(policy, target_suffixes, r: int, alpha: int):
 # Training (LoRA-only BC) and merge
 # ---------------------------------------------------------------------------
 
+def base_action_logits(model, data_path: Path, device, batch_size: int = 4096):
+    """Greedy action logits of the *unadapted* policy over the whole dataset.
+
+    Call before injecting LoRA. Returns ``(logits, mirrored_logits)`` on the
+    CPU: the second is the base's answer to the horizontally flipped board, so
+    the mirror augmentation in :func:`lora_bc` can look up the matching anchor
+    instead of assuming the policy is exactly equivariant.
+    """
+    import torch
+
+    obs_all = torch.from_numpy(np.load(data_path)["obs"])
+    policy = model.policy
+    policy.set_training_mode(False)
+    out = []
+    for flip in (False, True):
+        chunks = []
+        with torch.no_grad():
+            for i in range(0, len(obs_all), batch_size):
+                obs_b = obs_all[i:i + batch_size].to(device, torch.float32)
+                if flip:
+                    obs_b = obs_b.flip(-1)
+                logits = policy.get_distribution(obs_b).distribution.logits
+                chunks.append(logits.float().cpu())
+        out.append(torch.cat(chunks))
+    print(f"[anchor] base logits for {len(obs_all):,} states (+mirrored)", flush=True)
+    return out[0], out[1]
+
+
 def lora_bc(model, lora_modules, data_path: Path, epochs: int,
-            batch_size: int, lr: float, device) -> None:
+            batch_size: int, lr: float, device, anchor: float = 0.0,
+            base_logits=None) -> None:
+    """Behavior-clone the demos into the LoRA adapters.
+
+    ``anchor`` > 0 adds ``anchor * KL(base || adapted)`` on every state, using
+    the frozen base distributions from :func:`base_action_logits`. The adapter
+    then only has to pay KL where the demonstrator actually disagrees with the
+    base, so a *strong* base keeps its play everywhere else instead of being
+    re-cloned down to the demonstrator's level.
+    """
     import torch
     import torch.nn.functional as F
 
@@ -320,23 +357,40 @@ def lora_bc(model, lora_modules, data_path: Path, epochs: int,
         obs_b = torch.where(m.view(-1, 1, 1, 1), obs_b.flip(-1), obs_b)
         swapped = torch.where(act_b == 1, torch.full_like(act_b, 2),
                               torch.where(act_b == 2, torch.full_like(act_b, 1), act_b))
-        return obs_b, torch.where(m, swapped, act_b)
+        return obs_b, torch.where(m, swapped, act_b), m
+
+    anchored = anchor > 0 and base_logits is not None
+    if anchored:
+        base_lg, base_lg_mir = base_logits
+        print(f"[lora] anchoring to the base policy (KL weight {anchor})", flush=True)
 
     t0 = time.time()
     for epoch in range(1, epochs + 1):
         order = train_idx[torch.randperm(len(train_idx))]
-        tot_ce = tot_n = 0
+        tot_ce = tot_kl = tot_n = 0
         for i in range(0, len(order) - batch_size + 1, batch_size):
             idx = order[i:i + batch_size]
             obs_b = obs_all[idx].to(device, torch.float32)
             act_b = act_all[idx].to(device)
             ret_b = ret_all[idx].to(device)
-            obs_b, act_b = mirror(obs_b, act_b)
+            obs_b, act_b, m = mirror(obs_b, act_b)
 
-            values, log_prob, entropy = policy.evaluate_actions(obs_b, act_b)
+            if anchored:
+                dist = policy.get_distribution(obs_b).distribution
+                log_prob, entropy = dist.log_prob(act_b), dist.entropy()
+                values = policy.predict_values(obs_b)
+                # Anchor on the base's answer to the board the student sees:
+                # the flipped copy for the mirrored half of the batch.
+                ref = torch.where(m.view(-1, 1), base_lg_mir[idx].to(device),
+                                  base_lg[idx].to(device))
+                kl = F.kl_div(dist.logits.log_softmax(-1), ref.log_softmax(-1),
+                              log_target=True, reduction="batchmean")
+            else:
+                values, log_prob, entropy = policy.evaluate_actions(obs_b, act_b)
+                kl = torch.zeros((), device=device)
             ce = -log_prob.mean()
             vf = F.mse_loss(values.flatten(), ret_b)
-            loss = ce + 0.5 * vf - 0.003 * entropy.mean()
+            loss = ce + anchor * kl + 0.5 * vf - 0.003 * entropy.mean()
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -344,6 +398,7 @@ def lora_bc(model, lora_modules, data_path: Path, epochs: int,
             opt.step()
             sched.step()
             tot_ce += ce.item() * len(idx)
+            tot_kl += kl.item() * len(idx)
             tot_n += len(idx)
 
         policy.set_training_mode(False)
@@ -356,7 +411,8 @@ def lora_bc(model, lora_modules, data_path: Path, epochs: int,
                 logits = policy.get_distribution(obs_b).distribution.logits
                 correct += (logits.argmax(-1) == act_b).sum().item()
         policy.set_training_mode(True)
-        print(f"[lora] epoch {epoch}/{epochs}: train ce={tot_ce / tot_n:.4f} "
+        kl_msg = f" kl={tot_kl / tot_n:.4f}" if anchored else ""
+        print(f"[lora] epoch {epoch}/{epochs}: train ce={tot_ce / tot_n:.4f}{kl_msg} "
               f"| val acc={correct / n_val:.4f} ({time.time() - t0:.0f}s)", flush=True)
     policy.set_training_mode(False)
 

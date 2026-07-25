@@ -17,10 +17,19 @@ Because each merged checkpoint is a plain ``EgoTransformer`` (identical
 architecture), the Django adapter loads them through the same ``PPO.load`` path
 -- exposed as the ``rl_trf_aggr`` and ``rl_trf_def`` strategies.
 
+``--init`` picks the base the adapter is merged into, and ``--tag`` names the
+result, so the same three styles can be grown on a stronger base: the
+battle-trained checkpoint gives ``rl_trf_battle_aggr`` and friends.
+
 Run:
 
     python examples/train_transformer_style.py --style aggressive
     python examples/train_transformer_style.py --style defensive
+
+    # playstyles on top of the battle-trained base (GPU scale)
+    python examples/train_transformer_style.py --style aggressive \\
+        --init examples/ppo_snake_transformer_battle.zip --tag battle \\
+        --transitions 300000 --epochs 8
 """
 
 from __future__ import annotations
@@ -40,7 +49,7 @@ sys.path.insert(0, str(REPO))
 
 from examples.train_transformer_battle import MIX_SIZES  # noqa: E402
 from examples.train_transformer_lora import (  # noqa: E402
-    TARGET_SUFFIXES, inject_attn_lora, inject_lora, lora_bc,
+    TARGET_SUFFIXES, base_action_logits, inject_attn_lora, inject_lora, lora_bc,
     merge_to_clean_checkpoint,
 )
 
@@ -52,11 +61,11 @@ _HEADINGS = [(0, -1), (1, 0), (0, 1), (-1, 0)]
 # Phase 1: style-biased expert demonstrations
 # ---------------------------------------------------------------------------
 
-def _collect_chunk(args: tuple[int, int, int, float, str]):
+def _collect_chunk(args: tuple[int, int, int, float, str, int]):
     """Play the styled expert as snake 0 vs a balanced search opponent until
     ``quota`` snake-0 transitions exist. Records ego obs (opponent folded in),
     the styled expert's relative action, and the base battle return."""
-    seed, grid, quota, eps, style = args
+    seed, grid, quota, eps, style, window = args
     random.seed(seed)
 
     from game.ai import _opposite, _simulate, choose_direction
@@ -87,6 +96,7 @@ def _collect_chunk(args: tuple[int, int, int, float, str]):
             agent = state.snakes[0]
             hidx = _heading_index(agent.direction)
             obs = ego_observation(agent.body, state.food, grid, hidx,
+                                  window=window,
                                   opponent_cells=opp_cells(state, 0))
 
             head, food = agent.body[0], state.food
@@ -140,7 +150,7 @@ def _collect_chunk(args: tuple[int, int, int, float, str]):
             np.asarray(ret_buf[:quota], dtype=np.float32))
 
 
-def collect_dataset(total, workers, out_path, style, eps=0.1):
+def collect_dataset(total, workers, out_path, style, window=11, eps=0.1):
     per_size = total // len(MIX_SIZES)
     chunk = 20_000
     tasks, seed = [], 0
@@ -148,7 +158,7 @@ def collect_dataset(total, workers, out_path, style, eps=0.1):
         remaining = per_size
         while remaining > 0:
             q = min(chunk, remaining)
-            tasks.append((seed, grid, q, eps, style))
+            tasks.append((seed, grid, q, eps, style, window))
             seed += 1
             remaining -= q
     random.shuffle(tasks)
@@ -175,7 +185,13 @@ def main() -> None:
     p.add_argument("--style", required=True,
                    choices=["aggressive", "defensive", "balanced"])
     p.add_argument("--init", type=Path,
-                   default=REPO / "examples" / "ppo_snake_transformer.zip")
+                   default=REPO / "examples" / "ppo_snake_transformer.zip",
+                   help="base checkpoint the adapter is merged into")
+    p.add_argument("--tag", default="",
+                   help="name segment for the output, e.g. --tag battle -> "
+                        "ppo_snake_transformer_battle_aggr.zip")
+    p.add_argument("--window", type=int, default=11,
+                   help="ego observation window; must match --init's window")
     p.add_argument("--dataset", type=Path, default=None)
     p.add_argument("--transitions", type=int, default=48_000)
     p.add_argument("--workers", type=int, default=max(2, (os.cpu_count() or 4) - 1))
@@ -185,18 +201,32 @@ def main() -> None:
     p.add_argument("--batch", type=int, default=1024)
     p.add_argument("--lr", type=float, default=5e-4)
     p.add_argument("--no-attn", action="store_true")
+    p.add_argument("--anchor", type=float, default=0.0,
+                   help="KL weight pulling the adapted policy back to --init on "
+                        "every state (0 = plain BC). Use with a base that is "
+                        "stronger than the styled expert, so the style is "
+                        "learned as a delta instead of re-cloning the expert.")
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--work-dir", type=Path, default=Path("/tmp/snake_trf_style"))
     args = p.parse_args()
     args.work_dir.mkdir(parents=True, exist_ok=True)
+
+    from gym_snake.obs import check_window
+
+    window = check_window(args.window)
     _short = {"aggressive": "aggr", "defensive": "def", "balanced": "bal"}[args.style]
-    out = args.out or (REPO / "examples" / f"ppo_snake_transformer_{_short}.zip")
+    stem = "_".join(x for x in ("ppo_snake_transformer", args.tag, _short) if x)
+    out = args.out or (REPO / "examples" / f"{stem}.zip")
 
     data_path = args.dataset
     if data_path is None or not data_path.exists():
-        data_path = args.work_dir / f"{args.style}_demos.npz"
+        # The demos depend on the style and the window only -- not on the base
+        # checkpoint -- so keep them keyed by those and share across bases.
+        data_path = (args.work_dir /
+                     f"{args.style}_w{window}_{args.transitions // 1000}k.npz")
         if not data_path.exists():
-            collect_dataset(args.transitions, args.workers, data_path, args.style)
+            collect_dataset(args.transitions, args.workers, data_path,
+                            args.style, window)
         else:
             print(f"[collect:{args.style}] reusing {data_path}", flush=True)
 
@@ -206,14 +236,27 @@ def main() -> None:
     import gym_snake.policies  # noqa: F401
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[setup] style={args.style} device={device} r={args.r} a={args.alpha}", flush=True)
+    print(f"[setup] style={args.style} base={args.init.name} device={device} "
+          f"window={window} r={args.r} a={args.alpha}", flush=True)
 
     model = PPO.load(str(args.init), device=device)
+    expected = (5, window, window)
+    if tuple(model.observation_space.shape) != expected:
+        raise SystemExit(
+            f"--init model expects observation {tuple(model.observation_space.shape)} "
+            f"but --window {window} builds {expected}: pass the matching --window "
+            f"(the ego window is part of the weights)."
+        )
+    # Snapshot the base's own answers *before* the adapters go in.
+    base_logits = (base_action_logits(model, data_path, device)
+                   if args.anchor > 0 else None)
+
     lora = inject_lora(model.policy, TARGET_SUFFIXES, args.r, args.alpha)
     if not args.no_attn:
         lora.update(inject_attn_lora(model.policy, args.r, args.alpha))
 
-    lora_bc(model, lora, data_path, args.epochs, args.batch, args.lr, device)
+    lora_bc(model, lora, data_path, args.epochs, args.batch, args.lr, device,
+            anchor=args.anchor, base_logits=base_logits)
     merge_to_clean_checkpoint(args.init, lora, device, out)
     print(f"[done:{args.style}] -> {out} ({out.stat().st_size // 1024} KiB)", flush=True)
 

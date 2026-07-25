@@ -146,6 +146,31 @@ _MODELS = {
         "label": "学習済みAI (Transformer バランス型)",
         "needs_gym_snake": True,
     },
+    # The same three playstyles grown on the *battle-trained* base instead of
+    # the single-snake one: the personality comes from the same styled experts,
+    # but the base underneath already knows how to fight, so these keep the
+    # battle model's strength and add a character on top.
+    "rl_trf_battle_aggr": {
+        "file": _EXAMPLES / "ppo_snake_transformer_battle_aggr.zip",
+        "obs": "ego",
+        "grid": None,
+        "label": "学習済みAI (対戦Transformer 攻撃型)",
+        "needs_gym_snake": True,
+    },
+    "rl_trf_battle_def": {
+        "file": _EXAMPLES / "ppo_snake_transformer_battle_def.zip",
+        "obs": "ego",
+        "grid": None,
+        "label": "学習済みAI (対戦Transformer 防御型)",
+        "needs_gym_snake": True,
+    },
+    "rl_trf_battle_bal": {
+        "file": _EXAMPLES / "ppo_snake_transformer_battle_bal.zip",
+        "obs": "ego",
+        "grid": None,
+        "label": "学習済みAI (対戦Transformer バランス型)",
+        "needs_gym_snake": True,
+    },
 }
 
 # Public set of RL strategy names for dispatchers (ai.choose, views).

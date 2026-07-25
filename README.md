@@ -74,6 +74,9 @@
 | 学習済みAI (Transformer 攻撃型) | `game/rl_agent.py` + `examples/ppo_snake_transformer_aggr.zip` | 任意（既定 20×20） |
 | 学習済みAI (Transformer 防御型) | `game/rl_agent.py` + `examples/ppo_snake_transformer_def.zip` | 任意（既定 20×20） |
 | 学習済みAI (Transformer バランス型) | `game/rl_agent.py` + `examples/ppo_snake_transformer_bal.zip` | 任意（既定 20×20） |
+| 学習済みAI (対戦Transformer 攻撃型) | `game/rl_agent.py` + `examples/ppo_snake_transformer_battle_aggr.zip` | 任意（既定 20×20） |
+| 学習済みAI (対戦Transformer 防御型) | `game/rl_agent.py` + `examples/ppo_snake_transformer_battle_def.zip` | 任意（既定 20×20） |
+| 学習済みAI (対戦Transformer バランス型) | `game/rl_agent.py` + `examples/ppo_snake_transformer_battle_bal.zip` | 任意（既定 20×20） |
 
 ### 1. 探索AI (BFS) — `game/ai.py`
 
@@ -139,6 +142,13 @@
     勝率 **45% / 30% / 10%**（攻撃度が単調に並ぶ）、相手との平均距離 **攻撃4.1 / 防御7.1**、
     生存長 **攻撃49 / 防御72**。攻撃 vs 防御の直接対戦は攻撃が58%勝ち。詳細は
     `examples/TRAINING_RESULTS.md`。
+- **対戦Transformer 攻撃型 / 防御型 / バランス型** … 同じ3性格を、**対戦フル学習版をベース**に
+  作り直したモデルです。素の LoRA BC は教師（探索AI）を再模倣するためベースがPPOで獲得した強さを
+  上書きしてしまうので、**ベース方策への KL アンカー**（`--anchor`、全状態でベースの手に留まり、
+  教師と食い違う＝性格が出る局面だけ差分を学ぶ）を併用しています。実測（vs探索AI・12×12・20戦）:
+  エサ **攻撃10.3 / バランス8.8 / 防御10.9**（単独版ベースの3.6/2.7/1.9から2.8〜5.7倍）、
+  相手との平均距離 **攻撃4.98 / 防御6.25**、生存長 **防御165**、攻撃 vs 防御の直接対戦は
+  **攻撃が70%勝ち**。防御型どうしの対決では新型が **97%対0%** で旧型を圧倒します。
 - **依存の無い環境でも安全**: `stable-baselines3`/`torch`（CNN/Transformerは加えて `gym_snake`）が未インストール、
   またはモデルファイルが無い場合は自動的に探索AIへフォールバックし、フロント側では該当オプションが
   選択不可になります。

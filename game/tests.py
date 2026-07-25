@@ -336,7 +336,8 @@ class RLAgentTests(TestCase):
         )
         # Every other ego model keeps the 11x11 default.
         for name in ("rl_cnn", "rl_trf", "rl_trf_battle", "rl_trf_aggr",
-                     "rl_trf_def", "rl_trf_bal"):
+                     "rl_trf_def", "rl_trf_bal", "rl_trf_battle_aggr",
+                     "rl_trf_battle_def", "rl_trf_battle_bal"):
             self.assertIsNone(rl_agent._MODELS[name].get("window"))
 
     def test_opponent_body_folded_into_feature_danger_sensors(self):
@@ -357,6 +358,9 @@ class RLAgentTests(TestCase):
         self.assertIsNone(rl_agent.required_grid("rl_trf_aggr"))
         self.assertIsNone(rl_agent.required_grid("rl_trf_def"))
         self.assertIsNone(rl_agent.required_grid("rl_trf_bal"))
+        self.assertIsNone(rl_agent.required_grid("rl_trf_battle_aggr"))
+        self.assertIsNone(rl_agent.required_grid("rl_trf_battle_def"))
+        self.assertIsNone(rl_agent.required_grid("rl_trf_battle_bal"))
 
     def test_style_transformers_are_registered(self):
         # The aggressive / defensive / balanced playstyle models are first-class
@@ -370,9 +374,30 @@ class RLAgentTests(TestCase):
             self.assertIsNone(meta[name]["grid"])
             self.assertEqual(meta[name]["available"], rl_agent.is_available(name))
 
+    def test_battle_style_transformers_are_registered(self):
+        # The same three playstyles grown on the battle-trained base are their
+        # own strategies, distinct from the single-snake-based ones.
+        meta = rl_agent.strategies_meta()
+        for name, kw in (("rl_trf_battle_aggr", "攻撃"),
+                         ("rl_trf_battle_def", "防御"),
+                         ("rl_trf_battle_bal", "バランス")):
+            self.assertIn(name, rl_agent.MODEL_NAMES)
+            self.assertIn(kw, meta[name]["label"])
+            self.assertIn("対戦", meta[name]["label"])
+            self.assertIsNone(meta[name]["grid"])
+            self.assertEqual(meta[name]["available"], rl_agent.is_available(name))
+        # Each style has its own weights file -- no accidental sharing.
+        files = {rl_agent._MODELS[n]["file"]
+                 for n in ("rl_trf_battle_aggr", "rl_trf_battle_def",
+                           "rl_trf_battle_bal", "rl_trf_battle",
+                           "rl_trf_aggr", "rl_trf_def", "rl_trf_bal")}
+        self.assertEqual(len(files), 7)
+
     def test_style_transformers_fall_back_when_unavailable(self):
         s = GameState(grid=20, snakes=[Snake(body=[(10, 10), (9, 10), (8, 10)], direction="right")])
-        for name in ("rl_trf_aggr", "rl_trf_def", "rl_trf_bal"):
+        for name in ("rl_trf_aggr", "rl_trf_def", "rl_trf_bal",
+                     "rl_trf_battle_aggr", "rl_trf_battle_def",
+                     "rl_trf_battle_bal"):
             direction, used = ai.choose(s, 0, strategy=name)
             expected = name if rl_agent.is_available(name) else "search"
             self.assertEqual(used, expected)

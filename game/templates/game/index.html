@@ -213,9 +213,16 @@
         <option value="rl_trf">学習済みAI (ego/Transformer)</option>
         <option value="rl_trf_w21">学習済みAI (ego/Transformer 広視野21x21)</option>
         <option value="rl_trf_battle">学習済みAI (ego/Transformer 対戦特化)</option>
-        <option value="rl_trf_aggr">学習済みAI (Transformer 攻撃型)</option>
-        <option value="rl_trf_def">学習済みAI (Transformer 防御型)</option>
-        <option value="rl_trf_bal">学習済みAI (Transformer バランス型)</option>
+        <optgroup label="性格 (対戦特化ベース)">
+          <option value="rl_trf_battle_aggr">対戦Transformer 攻撃型</option>
+          <option value="rl_trf_battle_def">対戦Transformer 防御型</option>
+          <option value="rl_trf_battle_bal">対戦Transformer バランス型</option>
+        </optgroup>
+        <optgroup label="性格 (単独版ベース)">
+          <option value="rl_trf_aggr">Transformer 攻撃型</option>
+          <option value="rl_trf_def">Transformer 防御型</option>
+          <option value="rl_trf_bal">Transformer バランス型</option>
+        </optgroup>
       </select>
     </div>
     <div class="mode s2" id="s2Controls">
@@ -227,9 +234,16 @@
         <option value="rl_trf">学習済みAI (ego/Transformer)</option>
         <option value="rl_trf_w21">学習済みAI (ego/Transformer 広視野21x21)</option>
         <option value="rl_trf_battle">学習済みAI (ego/Transformer 対戦特化)</option>
-        <option value="rl_trf_aggr">学習済みAI (Transformer 攻撃型)</option>
-        <option value="rl_trf_def">学習済みAI (Transformer 防御型)</option>
-        <option value="rl_trf_bal">学習済みAI (Transformer バランス型)</option>
+        <optgroup label="性格 (対戦特化ベース)">
+          <option value="rl_trf_battle_aggr">対戦Transformer 攻撃型</option>
+          <option value="rl_trf_battle_def">対戦Transformer 防御型</option>
+          <option value="rl_trf_battle_bal">対戦Transformer バランス型</option>
+        </optgroup>
+        <optgroup label="性格 (単独版ベース)">
+          <option value="rl_trf_aggr">Transformer 攻撃型</option>
+          <option value="rl_trf_def">Transformer 防御型</option>
+          <option value="rl_trf_bal">Transformer バランス型</option>
+        </optgroup>
       </select>
     </div>
     <div class="mode">
@@ -475,6 +489,9 @@
         rl_trf_aggr: '学習済みAI(Transformer攻撃)',
         rl_trf_def: '学習済みAI(Transformer防御)',
         rl_trf_bal: '学習済みAI(Transformerバランス)',
+        rl_trf_battle_aggr: '学習済みAI(対戦Transformer攻撃)',
+        rl_trf_battle_def: '学習済みAI(対戦Transformer防御)',
+        rl_trf_battle_bal: '学習済みAI(対戦Transformerバランス)',
       };
 
       function handleStepMessage(data) {
