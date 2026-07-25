@@ -14,6 +14,8 @@ Requires PyTorch (installed via the ``[train]`` extra).
 
 from __future__ import annotations
 
+import contextlib
+
 import gymnasium as gym
 import torch
 import torch.nn as nn
@@ -134,6 +136,15 @@ class EgoTransformer(BaseFeaturesExtractor):
     size, this extractor — like the CNN — is board-size independent. Dropout
     is disabled by default: stochastic policies during PPO rollouts hurt more
     than they regularize.
+
+    The observation window is read from ``observation_space``, so a wider ego
+    view (e.g. ``(5, 21, 21)``, see ``gym_snake.obs``) needs no code change —
+    only more tokens: ``(window / patch_size)**2``, whose attention cost grows
+    quadratically. ``amp=True`` runs the trunk under ``bfloat16`` autocast on
+    CUDA (~3x faster and ~2x less memory at 441 tokens) and returns float32
+    features, so the policy/value heads and the PPO ratio math stay in full
+    precision. It self-disables for CPU tensors, so a model trained with
+    ``amp=True`` still loads and plays on CPU bit-identically to fp32 inference.
     """
 
     def __init__(
@@ -145,9 +156,11 @@ class EgoTransformer(BaseFeaturesExtractor):
         num_layers: int = 3,
         dim_feedforward: int = 256,
         patch_size: int = 2,
+        amp: bool = False,
     ):
         super().__init__(observation_space, features_dim)
         c, h, w = observation_space.shape
+        self.amp = amp
         # Pad H/W up to a multiple of patch_size, then embed each patch with a
         # strided conv (the standard ViT patch embedding). patch_size=1 is the
         # per-cell tokenization; patch_size=2 quarters the token count, which
@@ -172,16 +185,25 @@ class EgoTransformer(BaseFeaturesExtractor):
         self.head = nn.Sequential(nn.Linear(d_model, features_dim), nn.ReLU())
 
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
-        b = observations.shape[0]
-        x = observations
-        if self._pad_h or self._pad_w:
-            x = nn.functional.pad(x, (0, self._pad_w, 0, self._pad_h))
-        # (B, C, H, W) -> (B, d_model, H/p, W/p) -> (B, tokens, d_model)
-        x = self.embed(x).flatten(2).transpose(1, 2)
-        cls = self.cls_token.expand(b, -1, -1)
-        x = torch.cat([cls, x], dim=1) + self.pos_embed
-        x = self.encoder(x)
-        return self.head(self.norm(x[:, 0]))
+        # nullcontext (not autocast(enabled=False)) on the CPU path: building a
+        # cuda autocast context warns on a machine without CUDA.
+        ctx = (
+            torch.autocast("cuda", dtype=torch.bfloat16)
+            if self.amp and observations.is_cuda
+            else contextlib.nullcontext()
+        )
+        with ctx:
+            b = observations.shape[0]
+            x = observations
+            if self._pad_h or self._pad_w:
+                x = nn.functional.pad(x, (0, self._pad_w, 0, self._pad_h))
+            # (B, C, H, W) -> (B, d_model, H/p, W/p) -> (B, tokens, d_model)
+            x = self.embed(x).flatten(2).transpose(1, 2)
+            cls = self.cls_token.expand(b, -1, -1)
+            x = torch.cat([cls, x], dim=1) + self.pos_embed
+            x = self.encoder(x)
+            out = self.head(self.norm(x[:, 0]))
+        return out.float()
 
 
 def transformer_policy_kwargs(features_dim: int = 256, **kwargs) -> dict:

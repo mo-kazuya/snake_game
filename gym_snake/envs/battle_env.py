@@ -49,7 +49,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from gym_snake.obs import CHANNELS, WINDOW, ego_observation  # noqa: E402
+from gym_snake.obs import CHANNELS, check_window, ego_observation  # noqa: E402
 
 # Absolute headings as (dx, dy), clockwise -- identical to SnakeEnv._HEADINGS.
 #   index: 0=up  1=right  2=down  3=left
@@ -170,6 +170,10 @@ class SnakeBattleEnv(gym.Env):
     opponent:
         Opponent spec string for :func:`make_opponent` (``"search"`` by
         default), or an already-built ``fn(state, idx) -> direction`` callable.
+    ego_window:
+        Side of the ego observation (odd, >= 5); ``None`` uses
+        :data:`gym_snake.obs.WINDOW`. Must match the window the policy being
+        trained / warm-started was built for.
     reward_shaping:
         Add SnakeEnv's small toward/away-from-food nudge each step.
     max_steps_without_food:
@@ -195,6 +199,7 @@ class SnakeBattleEnv(gym.Env):
         self,
         grid_size: int = 12,
         opponent: str | object = "search",
+        ego_window: int | None = None,
         reward_shaping: bool = True,
         max_steps_without_food: int | None = None,
         reward_opp_death: float = 0.0,
@@ -207,6 +212,7 @@ class SnakeBattleEnv(gym.Env):
             raise ValueError("grid_size must be >= 5")
 
         self.grid_size = grid_size
+        self.ego_window = check_window(ego_window)
         self._opponent_spec = opponent
         self._opponent_fn = opponent if callable(opponent) else None
         self.reward_shaping = reward_shaping
@@ -222,7 +228,8 @@ class SnakeBattleEnv(gym.Env):
 
         self.action_space = spaces.Discrete(3)
         self.observation_space = spaces.Box(
-            low=0.0, high=1.0, shape=(CHANNELS, WINDOW, WINDOW), dtype=np.float32,
+            low=0.0, high=1.0,
+            shape=(CHANNELS, self.ego_window, self.ego_window), dtype=np.float32,
         )
 
         self._state = None            # game.engine.GameState
@@ -346,14 +353,15 @@ class SnakeBattleEnv(gym.Env):
         me = state.snakes[0]
         if not me.body:  # dead: body is cleared by the engine
             return np.zeros(
-                (CHANNELS, WINDOW, WINDOW), dtype=np.float32
+                (CHANNELS, self.ego_window, self.ego_window), dtype=np.float32
             )
         opp_cells = [
             cell for cell in state.snakes[1].body if state.snakes[1].alive
         ]
         return ego_observation(
             me.body, state.food, state.grid,
-            _heading_index(me.direction), opponent_cells=opp_cells,
+            _heading_index(me.direction), window=self.ego_window,
+            opponent_cells=opp_cells,
         )
 
     def _rel_to_dir(self, direction: str, action: int) -> str:

@@ -36,7 +36,7 @@ print(info)  # {'score': ..., 'length': ..., 'steps': ...}
 | **行動空間** | `Discrete(3)` — `0`=直進 / `1`=右折 / `2`=左折（相対方向。逆走による即死が無く学習しやすい） |
 | **観測 `obs_type="grid"`**（既定） | `Box(0,1, shape=(3, H, W), float32)`。チャンネル `[体, 頭, エサ]`。CNN向け |
 | **観測 `obs_type="features"`** | `Box(0,1, shape=(11,), float32)`。危険センサ3＋進行方向one-hot4＋エサ方向4。MLP向け・高速 |
-| **観測 `obs_type="ego"`** | `Box(0,1, shape=(5, 11, 11), float32)`。頭中心・進行方向が上になるよう回転した局所ビュー＋盤面ミニマップ（`gym_snake/obs.py`）。**形状が盤面サイズ非依存**なので1つのモデルが任意の盤面で動く。CNN向け・**推奨** |
+| **観測 `obs_type="ego"`** | `Box(0,1, shape=(5, W, W), float32)`（既定 `W=11`、`ego_window` で変更可）。頭中心・進行方向が上になるよう回転した局所ビュー＋盤面ミニマップ（`gym_snake/obs.py`）。**形状が盤面サイズ非依存**なので1つのモデルが任意の盤面で動く。CNN向け・**推奨** |
 | **報酬** | エサ `+1.0` ／ 死亡 `-1.0` ／ 毎ステップ `-0.005` ／ （任意）エサに近づくと `±0.05` のシェイピング |
 | **終了 terminated** | 壁 or 自分の体に衝突（または盤面を埋め尽くしてクリア） |
 | **打ち切り truncated** | エサを取らずに `max_steps_without_food`（既定 `H*W`）ステップ経過 |
@@ -47,6 +47,7 @@ print(info)  # {'score': ..., 'length': ..., 'steps': ...}
 |------|------|------|
 | `grid_size` | `12` | 盤面の一辺のマス数（`>=5`） |
 | `obs_type` | `"grid"` | `"grid"` / `"features"` / `"ego"` |
+| `ego_window` | `None` (=11) | `obs_type="ego"` の観測窓の一辺（**奇数・5以上**）。大きくすると頭の周囲をより広く見え、ミニマップの縮約も粗くなくなる。学習時と推論時で必ず同じ値にすること |
 | `reward_shaping` | `True` | エサへの接近/離反に応じた小報酬の有無 |
 | `max_steps_without_food` | `H*W` | 空回り防止の打ち切り上限 |
 | `render_mode` | `None` | `"ansi"` / `"rgb_array"` / `"human"` |
@@ -114,6 +115,9 @@ env = gym.make("gym_snake/SnakeBattle-v0", grid_size=12, opponent="search",
                reward_win=1.0, reward_lose=-1.0)
 obs, info = env.reset(seed=0)   # obs.shape == (5, 11, 11)
 ```
+
+`SnakeBattleEnv` も `ego_window` を受け取ります（単独版と同じ観測窓を指定すれば、
+広視野モデルからもそのままウォームスタートできます）。
 
 相手方策 `opponent` は次の文字列で指定します（`make_opponent`）:
 

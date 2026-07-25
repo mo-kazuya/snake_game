@@ -307,6 +307,38 @@ class RLAgentTests(TestCase):
                 np.array_equal(rl_agent.build_observation(s, "ego", 0), env._get_obs())
             )
 
+    def test_ego_observation_honours_the_model_window(self):
+        """A model trained with a wider ego window must be fed that window."""
+        try:
+            from gym_snake.envs import SnakeEnv
+        except Exception:
+            self.skipTest("gym_snake not importable")
+        import numpy as np
+
+        for window in (11, 21):
+            env = SnakeEnv(grid_size=20, obs_type="ego", ego_window=window)
+            env.reset(seed=4)
+            s = self._mirror(env)
+            obs = rl_agent.build_observation(s, "ego", 0, window)
+            self.assertEqual(obs.shape, (5, window, window))
+            self.assertTrue(np.array_equal(obs, env._get_obs()))
+
+    def test_wide_window_transformer_is_registered(self):
+        # The 21x21-window Transformer is a first-class RL strategy, and its
+        # registry entry carries the window its weights expect.
+        self.assertIn("rl_trf_w21", rl_agent.MODEL_NAMES)
+        self.assertEqual(rl_agent._MODELS["rl_trf_w21"]["window"], 21)
+        self.assertIsNone(rl_agent.required_grid("rl_trf_w21"))
+        meta = rl_agent.strategies_meta()
+        self.assertIn("21x21", meta["rl_trf_w21"]["label"])
+        self.assertEqual(
+            meta["rl_trf_w21"]["available"], rl_agent.is_available("rl_trf_w21")
+        )
+        # Every other ego model keeps the 11x11 default.
+        for name in ("rl_cnn", "rl_trf", "rl_trf_battle", "rl_trf_aggr",
+                     "rl_trf_def", "rl_trf_bal"):
+            self.assertIsNone(rl_agent._MODELS[name].get("window"))
+
     def test_opponent_body_folded_into_feature_danger_sensors(self):
         s = GameState(grid=20, snakes=[
             Snake(body=[(5, 5), (4, 5), (3, 5)], direction="right"),

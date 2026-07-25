@@ -14,6 +14,14 @@ Because the output shape ``(5, WINDOW, WINDOW)`` never depends on the board
 size, one trained model runs on 10x10 and 20x20 boards alike — no adaptive
 pooling tricks needed, and a plain flatten CNN head works.
 
+``WINDOW`` is only the *default*: :func:`ego_observation` takes a ``window``
+argument, and every consumer (``SnakeEnv``/``SnakeBattleEnv`` via ``ego_window``,
+the Django adapter via the per-model ``window`` entry in ``game.rl_agent``)
+threads it through. A larger odd window widens the local view (more cells of
+real geometry around the head) *and* refines the minimap (the board is
+downscaled less), at a quadratic cost in tokens for the Transformer policy. A
+model must always be fed the same window it was trained with.
+
 Channels:
 
 ====  =========================================================
@@ -37,6 +45,20 @@ import numpy as np
 
 WINDOW = 11  # side of both the local view and the minimap (odd: head-centered)
 CHANNELS = 5
+
+
+def check_window(window: int | None) -> int:
+    """Validate an ego window size, returning it (``None`` -> :data:`WINDOW`).
+
+    The window must be **odd** (so the head sits on the exact center pixel and
+    "straight ahead" is always the same pixel) and at least 5.
+    """
+    if window is None:
+        return WINDOW
+    window = int(window)
+    if window < 5 or window % 2 == 0:
+        raise ValueError(f"ego window must be an odd int >= 5, got {window}")
+    return window
 
 
 def _resize(arr: np.ndarray, out: int) -> np.ndarray:

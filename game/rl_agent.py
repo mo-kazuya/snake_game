@@ -14,6 +14,11 @@ Two reinforcement-learning models were trained in the ``gym_snake`` environment
                   size** — it was curriculum-trained on 10x10 then fine-tuned
                   on 20x20.
 
+The ego window is per model, not global: the registry entry carries the
+``window`` its weights were trained with (11 unless stated otherwise; e.g.
+``"rl_trf_w21"`` uses a 21x21 window) and :func:`build_observation` builds
+exactly that shape.
+
 This module converts a Django :class:`~game.engine.GameState` into the matching
 observation, asks the policy for an action, and converts the relative action
 back into an absolute direction the engine understands.
@@ -57,6 +62,8 @@ _EXAMPLES = Path(settings.BASE_DIR) / "examples"
 
 # Registry of trained models. ``grid`` is the board size the model requires;
 # ``None`` means the observation is size-independent (runs on any board).
+# ``window`` (ego models only, optional) is the ego observation window the model
+# was trained with; absent/``None`` means the 11x11 default.
 _MODELS = {
     "rl": {
         "file": _EXAMPLES / "ppo_snake_features.zip",
@@ -80,6 +87,22 @@ _MODELS = {
         "grid": None,
         "label": "学習済みAI (ego/Transformer)",
         "needs_gym_snake": True,  # EgoTransformer class lives in gym_snake
+    },
+    "rl_trf_w21": {
+        # Same recipe as ``rl_trf`` (BC on the search AI + PPO) but with a
+        # **21x21 ego window** instead of 11x11: the local view reaches ~10
+        # cells around the head instead of 5, and the minimap downscales the
+        # board far less, so the policy sees long body walls and distant food
+        # geometry it previously had to guess. 441 tokens instead of 121 ->
+        # ~10 ms per move on CPU (measured end-to-end through choose_direction),
+        # still well below the game tick. It beats the 11x11 model on small and
+        # mid boards and loses on large ones -- see examples/TRAINING_RESULTS.md.
+        "file": _EXAMPLES / "ppo_snake_transformer_w21.zip",
+        "obs": "ego",
+        "grid": None,
+        "window": 21,
+        "label": "学習済みAI (ego/Transformer 広視野21x21)",
+        "needs_gym_snake": True,
     },
     "rl_trf_battle": {
         # Same EgoTransformer architecture as ``rl_trf`` but fine-tuned in the
@@ -222,18 +245,25 @@ def _opponent_cells(state: GameState, snake_index: int) -> list[tuple[int, int]]
     ]
 
 
-def build_observation(state: GameState, obs_type: str, snake_index: int):
+def build_observation(state: GameState, obs_type: str, snake_index: int,
+                      window: int | None = None):
     """Convert a Django game state into the requested gym_snake observation
-    for ``state.snakes[snake_index]``."""
+    for ``state.snakes[snake_index]``.
+
+    ``window`` only applies to ``obs_type="ego"`` and must be the window the
+    model was trained with (``None`` = the 11x11 default); feeding a model the
+    wrong window is a shape mismatch at best and silent nonsense at worst.
+    """
     if obs_type == "grid":
         return _grid_observation(state, snake_index)
     if obs_type == "ego":
         # Single source of truth: the exact function SnakeEnv uses in training.
-        from gym_snake.obs import ego_observation
+        from gym_snake.obs import check_window, ego_observation
 
         me = state.snakes[snake_index]
         return ego_observation(
             me.body, state.food, state.grid, _heading_index(me.direction),
+            window=check_window(window),
             opponent_cells=_opponent_cells(state, snake_index),
         )
     return _feature_observation(state, snake_index)
@@ -312,7 +342,8 @@ def choose_direction(state: GameState, snake_index: int, name: str = "rl") -> st
     """Return the absolute direction model ``name`` would take for
     ``state.snakes[snake_index]``."""
     model = _load_model(name)
-    obs = build_observation(state, _MODELS[name]["obs"], snake_index)
+    cfg = _MODELS[name]
+    obs = build_observation(state, cfg["obs"], snake_index, cfg.get("window"))
     action, _ = model.predict(obs, deterministic=True)
 
     me = state.snakes[snake_index]

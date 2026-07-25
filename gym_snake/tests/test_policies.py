@@ -85,3 +85,32 @@ def test_ego_transformer_batch():
     obs, _ = env.reset(seed=0)
     batch = torch.as_tensor(obs).unsqueeze(0).repeat(16, 1, 1, 1)
     assert extractor(batch).shape == (16, 64)
+
+
+def test_ego_transformer_wide_window_token_count():
+    """A wider ego window means more tokens, no code change needed."""
+    for window, patch, expected in ((11, 1, 121), (21, 1, 441), (21, 2, 121)):
+        env = SnakeEnv(grid_size=10, obs_type="ego", ego_window=window)
+        ext = EgoTransformer(env.observation_space, features_dim=64, d_model=32,
+                             nhead=4, num_layers=1, dim_feedforward=64,
+                             patch_size=patch)
+        assert ext.n_tokens == expected
+        assert ext.pos_embed.shape == (1, expected + 1, 32)
+        obs, _ = env.reset(seed=0)
+        assert ext(torch.as_tensor(obs).unsqueeze(0)).shape == (1, 64)
+
+
+def test_ego_transformer_amp_is_a_cpu_noop():
+    """amp=True must stay float32 (and identical) on CPU, so a GPU-trained
+    model plays on the Django server exactly as it was evaluated."""
+    env = SnakeEnv(grid_size=10, obs_type="ego", ego_window=21)
+    plain = EgoTransformer(env.observation_space, features_dim=64, d_model=32,
+                           nhead=4, num_layers=1, dim_feedforward=64)
+    amped = EgoTransformer(env.observation_space, features_dim=64, d_model=32,
+                           nhead=4, num_layers=1, dim_feedforward=64, amp=True)
+    amped.load_state_dict(plain.state_dict())
+    obs = torch.as_tensor(env.reset(seed=0)[0]).unsqueeze(0)
+    with torch.no_grad():
+        out = amped(obs)
+    assert out.dtype == torch.float32
+    assert torch.equal(out, plain(obs))

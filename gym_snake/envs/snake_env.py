@@ -42,7 +42,14 @@ class SnakeEnv(gym.Env):
     grid_size:
         Side length of the square board (number of cells). Default 12.
     obs_type:
-        ``"grid"`` (3xHxW image) or ``"features"`` (11-dim vector).
+        ``"grid"`` (3xHxW image), ``"ego"`` (egocentric window + minimap) or
+        ``"features"`` (11-dim vector).
+    ego_window:
+        Side of the ego local view / minimap when ``obs_type="ego"`` (odd,
+        >= 5). ``None`` uses :data:`gym_snake.obs.WINDOW` (11). A wider window
+        shows more real geometry around the head and a finer minimap; the
+        observation stays board-size independent either way. A trained model
+        must always be run with the window it was trained on.
     reward_shaping:
         If True, add a small +/- reward for moving closer to / farther from the
         food. Helps early learning; turn off for a "pure" reward.
@@ -65,6 +72,7 @@ class SnakeEnv(gym.Env):
         self,
         grid_size: int = 12,
         obs_type: str = "grid",
+        ego_window: int | None = None,
         reward_shaping: bool = True,
         max_steps_without_food: int | None = None,
         render_mode: str | None = None,
@@ -75,8 +83,11 @@ class SnakeEnv(gym.Env):
         if obs_type not in ("grid", "features", "ego"):
             raise ValueError("obs_type must be 'grid', 'features' or 'ego'")
 
+        from gym_snake.obs import check_window
+
         self.grid_size = grid_size
         self.obs_type = obs_type
+        self.ego_window = check_window(ego_window)
         self.reward_shaping = reward_shaping
         self.max_steps_without_food = (
             max_steps_without_food
@@ -101,7 +112,7 @@ class SnakeEnv(gym.Env):
 
             self.observation_space = spaces.Box(
                 low=0.0, high=1.0,
-                shape=(ego_obs.CHANNELS, ego_obs.WINDOW, ego_obs.WINDOW),
+                shape=(ego_obs.CHANNELS, self.ego_window, self.ego_window),
                 dtype=np.float32,
             )
         else:  # "features"
@@ -208,7 +219,8 @@ class SnakeEnv(gym.Env):
             from gym_snake.obs import ego_observation
 
             return ego_observation(
-                self.snake, self.food, self.grid_size, self.heading_idx
+                self.snake, self.food, self.grid_size, self.heading_idx,
+                window=self.ego_window,
             )
         return self._feature_obs()
 

@@ -12,9 +12,12 @@ the two-snake :class:`~gym_snake.envs.battle_env.SnakeBattleEnv`, whose rules ar
 the exact engine the Django server runs):
 
 1. **Warm-start** from the shipped single-snake Transformer (``--init``). Its
-   observation space ``(5, 11, 11)`` and action space ``Discrete(3)`` are
+   observation space ``(5, W, W)`` and action space ``Discrete(3)`` are
    identical to the battle env, so the weights transfer directly — no surgery.
    (Use ``--no-init`` to train the same architecture from scratch instead.)
+   ``--window`` selects the ego window (see ``gym_snake/obs.py``); it must match
+   the ``--init`` model's, and the defaults for ``--init``/``--out`` follow it,
+   so ``--window 21`` warm-starts the 21x21 model into a 21x21 battle model.
 2. *(optional)* **Behavior-clone** on expert **battle** demonstrations: the BFS
    search AI playing snake 0 against a search-AI opponent, so the value head and
    policy get an opponent-aware warm start before RL. Enable with
@@ -33,8 +36,11 @@ Run:
     # warm-start from the shipped model, PPO fine-tune vs search+random
     python examples/train_transformer_battle.py
 
-    # add an opponent-aware BC warm start first
+    # full GPU recipe: opponent-aware BC warm start, then 8M PPO steps
     python examples/train_transformer_battle.py --bc-transitions 600000
+
+    # ...on top of the wide-view (21x21) single-snake model
+    python examples/train_transformer_battle.py --window 21 --bc-transitions 600000
 
     # self-play against a previous checkpoint
     python examples/train_transformer_battle.py \
@@ -67,8 +73,7 @@ GAMMA = 0.99
 
 # Same architecture as the shipped v2 Transformer, so --init weights load
 # straight in (and --no-init reproduces that architecture from scratch).
-MODEL_KWARGS = dict(d_model=128, nhead=8, num_layers=4,
-                    dim_feedforward=512, patch_size=1)
+MODEL_KWARGS = dict(d_model=128, nhead=8, num_layers=4, dim_feedforward=512)
 
 # Battle-specific reward bonuses layered on top of the SnakeEnv-identical base.
 REWARD_OPP_DEATH = 0.5   # once, when the opponent dies while we're alive
@@ -82,7 +87,7 @@ _HEADINGS = [(0, -1), (1, 0), (0, 1), (-1, 0)]
 # Phase 1: expert *battle* demonstrations (search AI vs search AI, parallel)
 # ---------------------------------------------------------------------------
 
-def _collect_chunk(args: tuple[int, int, int, float]):
+def _collect_chunk(args: tuple[int, int, int, float, int]):
     """Play the search AI as snake 0 against a search-AI opponent on `grid`
     boards until `quota` transitions for snake 0 exist.
 
@@ -93,7 +98,7 @@ def _collect_chunk(args: tuple[int, int, int, float]):
     move is executed instead of the expert's (DAgger-style off-distribution
     coverage) but the label stays the expert's.
     """
-    seed, grid, quota, eps = args
+    seed, grid, quota, eps, window = args
     random.seed(seed)
 
     from game.ai import _opposite, _simulate, choose_direction
@@ -123,6 +128,7 @@ def _collect_chunk(args: tuple[int, int, int, float]):
             agent = state.snakes[0]
             hidx = _heading_index(agent.direction)
             obs = ego_observation(agent.body, state.food, grid, hidx,
+                                  window=window,
                                   opponent_cells=opp_cells(state, 0))
 
             head, food = agent.body[0], state.food
@@ -178,7 +184,7 @@ def _collect_chunk(args: tuple[int, int, int, float]):
     return obs_arr, act_arr, ret_arr
 
 
-def collect_dataset(total: int, workers: int, out_path: Path,
+def collect_dataset(total: int, workers: int, out_path: Path, window: int,
                     eps: float = 0.1) -> Path:
     per_size = total // len(MIX_SIZES)
     chunk = 20_000
@@ -188,13 +194,14 @@ def collect_dataset(total: int, workers: int, out_path: Path,
         remaining = per_size
         while remaining > 0:
             q = min(chunk, remaining)
-            tasks.append((seed, grid, q, eps))
+            tasks.append((seed, grid, q, eps, window))
             seed += 1
             remaining -= q
     random.shuffle(tasks)
 
     print(f"[collect] {len(tasks)} chunks on {workers} workers "
-          f"({per_size:,} transitions x {len(MIX_SIZES)} sizes)", flush=True)
+          f"({per_size:,} transitions x {len(MIX_SIZES)} sizes, window={window})",
+          flush=True)
     t0 = time.time()
     obs_parts, act_parts, ret_parts = [], [], []
     with mp.Pool(workers) as pool:
@@ -219,7 +226,7 @@ def collect_dataset(total: int, workers: int, out_path: Path,
 # Environments
 # ---------------------------------------------------------------------------
 
-def make_env_fn(grid: int, opponent: str):
+def make_env_fn(grid: int, opponent: str, window: int):
     def _thunk():
         import gymnasium as gym
 
@@ -227,14 +234,15 @@ def make_env_fn(grid: int, opponent: str):
 
         return gym.make(
             "gym_snake/SnakeBattle-v0", grid_size=grid, opponent=opponent,
-            reward_opp_death=REWARD_OPP_DEATH,
+            ego_window=window, reward_opp_death=REWARD_OPP_DEATH,
             reward_win=REWARD_WIN, reward_lose=REWARD_LOSE,
         )
 
     return _thunk
 
 
-def evaluate(model, sizes, episodes: int, opponent: str = "search",
+def evaluate(model, sizes, episodes: int, window: int,
+             opponent: str = "search",
              seed0: int = 1000) -> tuple[dict[int, float], dict[int, float]]:
     """Greedy eval vs a fixed opponent. Returns (mean food, win-rate) per size."""
     from stable_baselines3.common.vec_env import DummyVecEnv
@@ -242,7 +250,8 @@ def evaluate(model, sizes, episodes: int, opponent: str = "search",
     food: dict[int, float] = {}
     winrate: dict[int, float] = {}
     for grid in sizes:
-        vec = DummyVecEnv([make_env_fn(grid, opponent) for _ in range(episodes)])
+        vec = DummyVecEnv([make_env_fn(grid, opponent, window)
+                           for _ in range(episodes)])
         vec.seed(seed0)
         obs = vec.reset()
         finished = np.zeros(episodes, dtype=bool)
@@ -266,26 +275,59 @@ def evaluate(model, sizes, episodes: int, opponent: str = "search",
 # Phase 2: behavior cloning (identical recipe to train_transformer_v2)
 # ---------------------------------------------------------------------------
 
+def _load_demos(data_path: Path, device, cache: str):
+    """Load the battle demos, keeping the observations in VRAM when they fit.
+
+    Same trick as ``train_transformer_v2._load_demos``: a BC step is a random
+    gather, so caching the whole (float16) set on the GPU removes the
+    host->device copy from every step. ``cache`` is ``auto``/``gpu``/``cpu``.
+    """
+    import torch
+
+    data = np.load(data_path)
+    obs = torch.from_numpy(data["obs"])           # (N,5,W,W) float16
+    act = torch.from_numpy(data["act"])           # (N,) int64
+    ret = torch.from_numpy(data["ret"])           # (N,) float32
+
+    on_gpu = False
+    if cache != "cpu" and device.type == "cuda":
+        free, _ = torch.cuda.mem_get_info(device)
+        if cache == "gpu" or obs.nbytes + act.nbytes + ret.nbytes < free * 0.55:
+            obs, act, ret = obs.to(device), act.to(device), ret.to(device)
+            on_gpu = True
+    if not on_gpu and torch.cuda.is_available():
+        obs = obs.pin_memory()  # pinned -> async, faster H2D copies
+    return obs, act, ret, on_gpu
+
+
 def behavior_clone(model, data_path: Path, epochs: int, batch_size: int,
-                   lr: float, device) -> None:
+                   lr: float, device, cache: str = "auto") -> None:
     import torch
     import torch.nn.functional as F
 
-    data = np.load(data_path)
-    obs_all = torch.from_numpy(data["obs"])           # (N,5,11,11) float16
-    act_all = torch.from_numpy(data["act"])           # (N,) int64
-    ret_all = torch.from_numpy(data["ret"])           # (N,) float32
+    obs_all, act_all, ret_all, on_gpu = _load_demos(data_path, device, cache)
     n = len(act_all)
     n_val = max(2048, n // 50)
     perm = torch.randperm(n, generator=torch.Generator().manual_seed(0))
+    perm = perm.to(obs_all.device)
     val_idx, train_idx = perm[:n_val], perm[n_val:]
-    print(f"[bc] {len(train_idx):,} train / {n_val:,} val transitions", flush=True)
+    print(f"[bc] {len(train_idx):,} train / {n_val:,} val transitions "
+          f"(obs on {'GPU' if on_gpu else 'CPU'})", flush=True)
 
     policy = model.policy
     policy.set_training_mode(True)
-    opt = torch.optim.Adam(policy.parameters(), lr=lr)
+    opt = torch.optim.Adam(policy.parameters(), lr=lr,
+                           fused=(device.type == "cuda"))
     total_steps = epochs * (len(train_idx) // batch_size)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, total_steps, eta_min=lr * 0.05)
+
+    def batch(idx):
+        """Gather one minibatch as float32 on `device`."""
+        o = obs_all[idx]
+        if not on_gpu:
+            o = o.to(device, non_blocking=True)
+        return (o.to(torch.float32), act_all[idx].to(device, non_blocking=True),
+                ret_all[idx].to(device, non_blocking=True))
 
     def mirror(obs_b, act_b):
         """Flip half of each batch left/right (ego frame): swap turn L/R."""
@@ -297,13 +339,11 @@ def behavior_clone(model, data_path: Path, epochs: int, batch_size: int,
 
     t0 = time.time()
     for epoch in range(1, epochs + 1):
-        order = train_idx[torch.randperm(len(train_idx))]
+        order = train_idx[torch.randperm(len(train_idx), device=train_idx.device)]
         tot_ce = tot_vf = tot_n = 0
         for i in range(0, len(order) - batch_size + 1, batch_size):
             idx = order[i:i + batch_size]
-            obs_b = obs_all[idx].to(device, torch.float32)
-            act_b = act_all[idx].to(device)
-            ret_b = ret_all[idx].to(device)
+            obs_b, act_b, ret_b = batch(idx)
             obs_b, act_b = mirror(obs_b, act_b)
 
             values, log_prob, entropy = policy.evaluate_actions(obs_b, act_b)
@@ -325,8 +365,7 @@ def behavior_clone(model, data_path: Path, epochs: int, batch_size: int,
             correct = ce_sum = 0.0
             for i in range(0, n_val, batch_size):
                 idx = val_idx[i:i + batch_size]
-                obs_b = obs_all[idx].to(device, torch.float32)
-                act_b = act_all[idx].to(device)
+                obs_b, act_b, _ = batch(idx)
                 dist = policy.get_distribution(obs_b)
                 logits = dist.distribution.logits
                 ce_sum += F.cross_entropy(logits, act_b, reduction="sum").item()
@@ -336,13 +375,17 @@ def behavior_clone(model, data_path: Path, epochs: int, batch_size: int,
               f"vf={tot_vf / tot_n:.3f} | val ce={ce_sum / n_val:.4f} "
               f"acc={correct / n_val:.4f} ({time.time() - t0:.0f}s)", flush=True)
     policy.set_training_mode(False)
+    del obs_all, act_all, ret_all, perm, train_idx, val_idx
+    if on_gpu:
+        torch.cuda.empty_cache()
 
 
 # ---------------------------------------------------------------------------
 # Phase 3: PPO fine-tuning with a best-by-battle-eval gate
 # ---------------------------------------------------------------------------
 
-def ppo_finetune(model, timesteps: int, best_path: Path, eval_every: int) -> None:
+def ppo_finetune(model, timesteps: int, best_path: Path, eval_every: int,
+                 window: int) -> None:
     from stable_baselines3.common.callbacks import BaseCallback
 
     class BestGate(BaseCallback):
@@ -358,7 +401,7 @@ def ppo_finetune(model, timesteps: int, best_path: Path, eval_every: int) -> Non
             self.next_eval = eval_every
 
         def _eval_and_save(self):
-            food, winrate = evaluate(self.model, self.gate_sizes, episodes=5)
+            food, winrate = evaluate(self.model, self.gate_sizes, 5, window)
             mean_food = float(np.mean(list(food.values())))
             mean_win = float(np.mean(list(winrate.values())))
             combined = mean_food + 10.0 * mean_win  # win-rate weighted in
@@ -386,7 +429,8 @@ def ppo_finetune(model, timesteps: int, best_path: Path, eval_every: int) -> Non
 
 # ---------------------------------------------------------------------------
 
-def build_model(vec_env, init_path: Path | None, device):
+def build_model(vec_env, init_path: Path | None, device,
+                patch_size: int = 1, amp: bool = False):
     """Build a fresh battle PPO and (optionally) warm-start its **policy
     weights** from ``init_path``.
 
@@ -409,12 +453,20 @@ def build_model(vec_env, init_path: Path | None, device):
         n_steps=1024, batch_size=1024, n_epochs=4,
         gamma=GAMMA, gae_lambda=0.95, ent_coef=0.005, clip_range=0.15,
         learning_rate=lambda pr: 1e-4 * pr,
-        policy_kwargs=transformer_policy_kwargs(**MODEL_KWARGS),
+        policy_kwargs=transformer_policy_kwargs(
+            patch_size=patch_size, amp=amp, **MODEL_KWARGS),
     )
 
     if init_path is not None and init_path.exists():
         print(f"[setup] warm-starting policy weights from {init_path}", flush=True)
         source = PPO.load(str(init_path), device=device)
+        if source.observation_space.shape != vec_env.observation_space.shape:
+            raise SystemExit(
+                f"--init model was trained with observation "
+                f"{source.observation_space.shape} but this run uses "
+                f"{vec_env.observation_space.shape}: pass the matching "
+                f"--window (the ego window is part of the weights)."
+            )
         missing, unexpected = model.policy.load_state_dict(
             source.policy.state_dict(), strict=False)
         if missing or unexpected:
@@ -432,9 +484,14 @@ def build_model(vec_env, init_path: Path | None, device):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--init", type=Path,
-                        default=REPO / "examples" / "ppo_snake_transformer.zip",
-                        help="single-snake Transformer to warm-start from")
+    parser.add_argument("--window", type=int, default=11,
+                        help="ego observation window (odd, >=5). Must match the "
+                             "--init model's window")
+    parser.add_argument("--patch-size", type=int, default=1,
+                        help="ViT patch size; tokens = (window/patch)^2")
+    parser.add_argument("--init", type=Path, default=None,
+                        help="single-snake Transformer to warm-start from "
+                             "(default: the shipped model for --window)")
     parser.add_argument("--no-init", action="store_true",
                         help="ignore --init and train the architecture from scratch")
     parser.add_argument("--opponents", type=str, default="search,random",
@@ -449,14 +506,29 @@ def main() -> None:
     parser.add_argument("--bc-epochs", type=int, default=10)
     parser.add_argument("--bc-batch", type=int, default=1024)
     parser.add_argument("--bc-lr", type=float, default=3e-4)
+    parser.add_argument("--bc-cache", choices=("auto", "gpu", "cpu"), default="auto",
+                        help="keep the demo observations in VRAM (auto: if they fit)")
+    parser.add_argument("--amp", dest="amp", action="store_true", default=True,
+                        help="bfloat16 autocast for the Transformer trunk on CUDA")
+    parser.add_argument("--no-amp", dest="amp", action="store_false")
     parser.add_argument("--timesteps", type=int, default=8_000_000)
     parser.add_argument("--n-envs", type=int, default=18)
     parser.add_argument("--eval-every", type=int, default=1_000_000)
-    parser.add_argument("--out", type=Path,
-                        default=REPO / "examples" / "ppo_snake_transformer_battle.zip")
-    parser.add_argument("--work-dir", type=Path, default=Path("/tmp/snake_trf_battle"))
+    parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument("--work-dir", type=Path, default=None)
     parser.add_argument("--skip-ppo", action="store_true")
     args = parser.parse_args()
+
+    from gym_snake.obs import check_window
+
+    window = check_window(args.window)
+    suffix = "" if window == 11 else f"_w{window}"
+    if args.init is None:
+        args.init = REPO / "examples" / f"ppo_snake_transformer{suffix}.zip"
+    if args.out is None:
+        args.out = REPO / "examples" / f"ppo_snake_transformer_battle{suffix}.zip"
+    if args.work_dir is None:
+        args.work_dir = Path(f"/tmp/snake_trf_battle{suffix}")
     args.work_dir.mkdir(parents=True, exist_ok=True)
 
     init_path = None if args.no_init else args.init
@@ -467,7 +539,7 @@ def main() -> None:
         data_path = args.work_dir / "battle_demos.npz"
         if not data_path.exists():
             collect_dataset(args.bc_transitions, args.workers, data_path,
-                            eps=args.demo_eps)
+                            window, eps=args.demo_eps)
         else:
             print(f"[collect] reusing cached {data_path}", flush=True)
 
@@ -477,26 +549,28 @@ def main() -> None:
 
     torch.set_float32_matmul_precision("high")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[setup] device={device}", flush=True)
+    amp = args.amp and device == "cuda"
+    print(f"[setup] device={device} window={window} patch={args.patch_size} "
+          f"amp={amp}", flush=True)
 
     opponents = [o.strip() for o in args.opponents.split(",") if o.strip()]
     sizes = [MIX_SIZES[i % len(MIX_SIZES)] for i in range(args.n_envs)]
-    env_fns = [make_env_fn(sizes[i], opponents[i % len(opponents)])
+    env_fns = [make_env_fn(sizes[i], opponents[i % len(opponents)], window)
                for i in range(args.n_envs)]
     vec_env = VecMonitor(SubprocVecEnv(env_fns))
     print(f"[setup] {args.n_envs} envs, sizes={sizes}, opponents={opponents}", flush=True)
 
-    model = build_model(vec_env, init_path, device)
+    model = build_model(vec_env, init_path, device, args.patch_size, amp)
     n_params = sum(p.numel() for p in model.policy.parameters())
     print(f"[setup] policy parameters: {n_params:,}", flush=True)
 
     # -- optional behavior cloning ------------------------------------------
     if data_path is not None:
         behavior_clone(model, data_path, args.bc_epochs, args.bc_batch,
-                       args.bc_lr, model.device)
+                       args.bc_lr, model.device, args.bc_cache)
         bc_path = args.work_dir / "battle_bc.zip"
         model.save(str(bc_path))
-        food, win = evaluate(model, EVAL_SIZES, episodes=10)
+        food, win = evaluate(model, EVAL_SIZES, 10, window)
         print("[bc] eval food:", {g: round(v, 2) for g, v in food.items()},
               "win:", {g: round(v, 2) for g, v in win.items()}, flush=True)
 
@@ -508,7 +582,7 @@ def main() -> None:
 
     # -- PPO fine-tune ------------------------------------------------------
     best_path = args.work_dir / "battle_ppo_best.zip"
-    ppo_finetune(model, args.timesteps, best_path, args.eval_every)
+    ppo_finetune(model, args.timesteps, best_path, args.eval_every, window)
     vec_env.close()
 
     # -- final: pick best gate checkpoint, evaluate thoroughly --------------
@@ -516,7 +590,7 @@ def main() -> None:
 
     final = PPO.load(str(best_path if best_path.exists() else args.out
                          if args.out.exists() else best_path), device=device)
-    food, win = evaluate(final, EVAL_SIZES, episodes=20)
+    food, win = evaluate(final, EVAL_SIZES, 20, window)
     print("[final] food (20 eps/size):", {g: round(v, 2) for g, v in food.items()}, flush=True)
     print("[final] win-rate vs search:", {g: round(v, 2) for g, v in win.items()}, flush=True)
     final.save(str(args.out))
