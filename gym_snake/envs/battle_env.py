@@ -184,6 +184,10 @@ class SnakeBattleEnv(gym.Env):
     max_steps_without_food:
         Stall truncation for the agent; defaults to ``grid_size**2`` (the same
         backstop the engine enforces).
+    reward_alive:
+        Paid on every tick the agent survives (0 = off, the default, so the
+        base reward stays identical to :class:`SnakeEnv`).
+
     reward_opp_death, reward_win, reward_lose:
         Optional battle-specific bonuses (all ``0.0`` by default so the base
         reward is identical to :class:`SnakeEnv`). ``reward_opp_death`` is paid
@@ -210,6 +214,7 @@ class SnakeBattleEnv(gym.Env):
         reward_opp_death: float = 0.0,
         reward_win: float = 0.0,
         reward_lose: float = 0.0,
+        reward_alive: float = 0.0,
         opponent_channels: bool = False,
         render_mode: str | None = None,
     ) -> None:
@@ -230,6 +235,7 @@ class SnakeBattleEnv(gym.Env):
         self.reward_opp_death = reward_opp_death
         self.reward_win = reward_win
         self.reward_lose = reward_lose
+        self.reward_alive = reward_alive
         self.opponent_channels = opponent_channels
         self.render_mode = render_mode
 
@@ -319,6 +325,13 @@ class SnakeBattleEnv(gym.Env):
                 reward += (
                     self.REWARD_SHAPING if new_dist < prev_dist else -self.REWARD_SHAPING
                 )
+
+        # Survival bonus: paid every tick the agent is still alive. This is the
+        # knob that expresses "staying alive beats scoring" -- with the food
+        # reward left alone, a policy trained with it prefers the line that
+        # keeps it breathing over the one that grabs a contested apple.
+        if self.reward_alive and agent.alive:
+            reward += self.reward_alive
 
         # Battle bonus: opponent just died while the agent is alive.
         if (

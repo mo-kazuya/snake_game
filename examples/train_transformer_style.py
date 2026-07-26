@@ -61,11 +61,11 @@ _HEADINGS = [(0, -1), (1, 0), (0, 1), (-1, 0)]
 # Phase 1: style-biased expert demonstrations
 # ---------------------------------------------------------------------------
 
-def _collect_chunk(args: tuple[int, int, int, float, str, int]):
+def _collect_chunk(args: tuple[int, int, int, float, str, int, bool]):
     """Play the styled expert as snake 0 vs a balanced search opponent until
     ``quota`` snake-0 transitions exist. Records ego obs (opponent folded in),
     the styled expert's relative action, and the base battle return."""
-    seed, grid, quota, eps, style, window = args
+    seed, grid, quota, eps, style, window, opp_channels = args
     random.seed(seed)
 
     from game.ai import _opposite, _simulate, choose_direction
@@ -79,11 +79,11 @@ def _collect_chunk(args: tuple[int, int, int, float, str, int]):
     act_buf: list[int] = []
     ret_buf: list[float] = []
 
+    def rivals(state, idx):
+        return [s for j, s in enumerate(state.snakes) if j != idx and s.alive]
+
     def opp_cells(state, idx):
-        return [
-            cell for j, s in enumerate(state.snakes)
-            if j != idx and s.alive for cell in s.body
-        ]
+        return [cell for s in rivals(state, idx) for cell in s.body]
 
     while len(act_buf) < quota:
         state = GameState(grid=grid)
@@ -95,9 +95,12 @@ def _collect_chunk(args: tuple[int, int, int, float, str, int]):
                and steps_since_food < grid * grid):
             agent = state.snakes[0]
             hidx = _heading_index(agent.direction)
+            opp = rivals(state, 0)
             obs = ego_observation(agent.body, state.food, grid, hidx,
                                   window=window,
-                                  opponent_cells=opp_cells(state, 0))
+                                  opponent_cells=[c for r in opp for c in r.body],
+                                  opponent_head=opp[0].body[0] if opp else None,
+                                  opponent_channels=opp_channels)
 
             head, food = agent.body[0], state.food
             prev_dist = abs(head[0] - food[0]) + abs(head[1] - food[1])
@@ -150,7 +153,8 @@ def _collect_chunk(args: tuple[int, int, int, float, str, int]):
             np.asarray(ret_buf[:quota], dtype=np.float32))
 
 
-def collect_dataset(total, workers, out_path, style, window=11, eps=0.1):
+def collect_dataset(total, workers, out_path, style, window=11,
+                    opp_channels=False, eps=0.1):
     per_size = total // len(MIX_SIZES)
     chunk = 20_000
     tasks, seed = [], 0
@@ -158,7 +162,7 @@ def collect_dataset(total, workers, out_path, style, window=11, eps=0.1):
         remaining = per_size
         while remaining > 0:
             q = min(chunk, remaining)
-            tasks.append((seed, grid, q, eps, style, window))
+            tasks.append((seed, grid, q, eps, style, window, opp_channels))
             seed += 1
             remaining -= q
     random.shuffle(tasks)
@@ -192,6 +196,10 @@ def main() -> None:
                         "ppo_snake_transformer_battle_aggr.zip")
     p.add_argument("--window", type=int, default=11,
                    help="ego observation window; must match --init's window")
+    p.add_argument("--opponent-channels", dest="opp_channels",
+                   action="store_true",
+                   help="build 8-channel observations (rival body/head); must "
+                        "match --init. Auto-detected from --init when omitted")
     p.add_argument("--dataset", type=Path, default=None)
     p.add_argument("--transitions", type=int, default=48_000)
     p.add_argument("--workers", type=int, default=max(2, (os.cpu_count() or 4) - 1))
@@ -211,9 +219,25 @@ def main() -> None:
     args = p.parse_args()
     args.work_dir.mkdir(parents=True, exist_ok=True)
 
-    from gym_snake.obs import check_window
+    from gym_snake.obs import check_window, ego_channels
 
     window = check_window(args.window)
+    if not args.opp_channels and args.init.exists():
+        # The base's observation space is the ground truth, so read it instead
+        # of making the caller repeat it. (Reading the checkpoint's metadata is
+        # cheap -- the weights stay on disk.)
+        from stable_baselines3.common.save_util import load_from_zip_file
+
+        base_data, _, _ = load_from_zip_file(str(args.init), device="cpu",
+                                             load_data=True)
+        base_shape = tuple(base_data["observation_space"].shape)
+        args.opp_channels = base_shape[0] == ego_channels(True)
+        if base_shape[1] != window:
+            raise SystemExit(
+                f"--init was trained with a {base_shape[1]}x{base_shape[1]} ego "
+                f"window; pass --window {base_shape[1]}."
+            )
+    opp_channels = args.opp_channels
     _short = {"aggressive": "aggr", "defensive": "def", "balanced": "bal"}[args.style]
     stem = "_".join(x for x in ("ppo_snake_transformer", args.tag, _short) if x)
     out = args.out or (REPO / "examples" / f"{stem}.zip")
@@ -222,11 +246,12 @@ def main() -> None:
     if data_path is None or not data_path.exists():
         # The demos depend on the style and the window only -- not on the base
         # checkpoint -- so keep them keyed by those and share across bases.
+        ch = ego_channels(opp_channels)
         data_path = (args.work_dir /
-                     f"{args.style}_w{window}_{args.transitions // 1000}k.npz")
+                     f"{args.style}_w{window}c{ch}_{args.transitions // 1000}k.npz")
         if not data_path.exists():
             collect_dataset(args.transitions, args.workers, data_path,
-                            args.style, window)
+                            args.style, window, opp_channels)
         else:
             print(f"[collect:{args.style}] reusing {data_path}", flush=True)
 
@@ -237,15 +262,16 @@ def main() -> None:
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[setup] style={args.style} base={args.init.name} device={device} "
-          f"window={window} r={args.r} a={args.alpha}", flush=True)
+          f"window={window} channels={ego_channels(opp_channels)} "
+          f"r={args.r} a={args.alpha} anchor={args.anchor}", flush=True)
 
     model = PPO.load(str(args.init), device=device)
-    expected = (5, window, window)
+    expected = (ego_channels(opp_channels), window, window)
     if tuple(model.observation_space.shape) != expected:
         raise SystemExit(
             f"--init model expects observation {tuple(model.observation_space.shape)} "
-            f"but --window {window} builds {expected}: pass the matching --window "
-            f"(the ego window is part of the weights)."
+            f"but this run builds {expected}: pass the matching --window / "
+            f"--opponent-channels (both are part of the weights)."
         )
     # Snapshot the base's own answers *before* the adapters go in.
     base_logits = (base_action_logits(model, data_path, device)

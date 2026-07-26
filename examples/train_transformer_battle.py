@@ -94,6 +94,33 @@ REWARD_OPP_DEATH = 0.5   # once, when the opponent dies while we're alive
 REWARD_WIN = 1.0         # terminal, if our score > opponent's
 REWARD_LOSE = -1.0       # terminal, if our score < opponent's
 
+# Playstyle *characters*, expressed as reward profiles rather than as imitation
+# of a styled expert. Cloning a search-AI-based teacher stops working once the
+# base outclasses it: measured against the search AI, the battle base kills the
+# rival in 83% of games while an aggression-cloned LoRA on top of it manages
+# 23%, i.e. the "aggressive" character came out *less* aggressive and weaker on
+# every axis. A reward says what the character wants without capping it at a
+# teacher's skill, so the character can be **stronger** than the base at its own
+# speciality.
+# Sizing matters more than sign here. A good policy eats 40+ apples per episode,
+# so the food term alone is worth +40; a 3.0 kill bonus or a 0.01/tick survival
+# wage is 7-12% of that and vanishes into the noise. Measured: characters
+# trained that way were behaviourally identical to the neutral policy (and to
+# each other) on every axis -- distance, kills, survival. The style term has to
+# be able to *outbid* a few apples before it changes what the policy does.
+STYLE_REWARDS = {
+    # The battle objective itself: the neutral middle of the three.
+    "balanced": dict(opp_death=REWARD_OPP_DEATH, alive=0.0,
+                     win=REWARD_WIN, lose=REWARD_LOSE),
+    # A kill is worth ~30 apples, so hunting beats grazing.
+    "aggressive": dict(opp_death=30.0, alive=0.0,
+                       win=REWARD_WIN, lose=REWARD_LOSE),
+    # Pure survival: no bounty on the rival, no interest in the final score,
+    # and a wage of 0.15/tick -- over a ~500-tick game that is worth more than
+    # everything it could have eaten.
+    "defensive": dict(opp_death=0.0, alive=0.15, win=0.0, lose=0.0),
+}
+
 _HEADINGS = [(0, -1), (1, 0), (0, 1), (-1, 0)]
 
 
@@ -243,7 +270,9 @@ def collect_dataset(total: int, workers: int, out_path: Path, window: int,
 # ---------------------------------------------------------------------------
 
 def make_env_fn(grid: int, opponent: str, window: int,
-                opp_channels: bool = False):
+                opp_channels: bool = False, style: str = "balanced"):
+    profile = STYLE_REWARDS[style]
+
     def _thunk():
         import gymnasium as gym
 
@@ -251,9 +280,9 @@ def make_env_fn(grid: int, opponent: str, window: int,
 
         return gym.make(
             "gym_snake/SnakeBattle-v0", grid_size=grid, opponent=opponent,
-            ego_window=window, reward_opp_death=REWARD_OPP_DEATH,
-            reward_win=REWARD_WIN, reward_lose=REWARD_LOSE,
-            opponent_channels=opp_channels,
+            ego_window=window, reward_opp_death=profile["opp_death"],
+            reward_win=profile["win"], reward_lose=profile["lose"],
+            reward_alive=profile["alive"], opponent_channels=opp_channels,
         )
 
     return _thunk
@@ -261,32 +290,44 @@ def make_env_fn(grid: int, opponent: str, window: int,
 
 def evaluate(model, sizes, episodes: int, window: int,
              opponent: str = "search", opp_channels: bool = False,
-             seed0: int = 1000) -> tuple[dict[int, float], dict[int, float]]:
-    """Greedy eval vs a fixed opponent. Returns (mean food, win-rate) per size."""
+             style: str = "balanced", seed0: int = 1000):
+    """Greedy eval vs a fixed opponent.
+
+    Returns ``(mean food, win-rate, mean episode return)`` per size. The return
+    is measured under ``style``'s reward, which is what a *character* is
+    actually trying to maximize -- gating on food alone would just pick the
+    checkpoint that drifted back towards the neutral policy.
+    """
     from stable_baselines3.common.vec_env import DummyVecEnv
 
     food: dict[int, float] = {}
     winrate: dict[int, float] = {}
+    ep_return: dict[int, float] = {}
     for grid in sizes:
-        vec = DummyVecEnv([make_env_fn(grid, opponent, window, opp_channels)
+        vec = DummyVecEnv([make_env_fn(grid, opponent, window, opp_channels, style)
                            for _ in range(episodes)])
         vec.seed(seed0)
         obs = vec.reset()
         finished = np.zeros(episodes, dtype=bool)
         eps_food = np.zeros(episodes)
         eps_win = np.zeros(episodes)
+        eps_ret = np.zeros(episodes)
+        running = np.zeros(episodes)
         while not finished.all():
             actions, _ = model.predict(obs, deterministic=True)
-            obs, _, dones, infos = vec.step(actions)
+            obs, rewards, dones, infos = vec.step(actions)
+            running += np.asarray(rewards) * ~finished
             for i in range(episodes):
                 if dones[i] and not finished[i]:
                     finished[i] = True
                     eps_food[i] = infos[i]["score"]
                     eps_win[i] = 1.0 if infos[i].get("win") else 0.0
+                    eps_ret[i] = running[i]
         vec.close()
         food[grid] = float(eps_food.mean())
         winrate[grid] = float(eps_win.mean())
-    return food, winrate
+        ep_return[grid] = float(eps_ret.mean())
+    return food, winrate, ep_return
 
 
 # ---------------------------------------------------------------------------
@@ -404,7 +445,8 @@ def behavior_clone(model, data_path: Path, epochs: int, batch_size: int,
 
 def ppo_finetune(model, timesteps: int, best_path: Path, eval_every: int,
                  window: int, opp_channels: bool = False,
-                 gate_episodes: int = 20) -> None:
+                 gate_episodes: int = 20, style: str = "balanced",
+                 gate_metric: str = "combined") -> None:
     from stable_baselines3.common.callbacks import BaseCallback
 
     class BestGate(BaseCallback):
@@ -426,11 +468,14 @@ def ppo_finetune(model, timesteps: int, best_path: Path, eval_every: int,
             self.next_eval = eval_every
 
         def _eval_and_save(self):
-            food, winrate = evaluate(self.model, self.gate_sizes, gate_episodes,
-                                     window, opp_channels=opp_channels)
+            food, winrate, rets = evaluate(
+                self.model, self.gate_sizes, gate_episodes, window,
+                opp_channels=opp_channels, style=style)
             mean_food = float(np.mean(list(food.values())))
             mean_win = float(np.mean(list(winrate.values())))
-            combined = mean_food + 10.0 * mean_win  # win-rate weighted in
+            mean_ret = float(np.mean(list(rets.values())))
+            combined = (mean_ret if gate_metric == "return"
+                        else mean_food + 10.0 * mean_win)
             line = " ".join(f"{g}:{food[g]:.1f}/{winrate[g]:.0%}" for g in self.gate_sizes)
             marker = ""
             if combined > self.best:
@@ -438,7 +483,8 @@ def ppo_finetune(model, timesteps: int, best_path: Path, eval_every: int,
                 self.model.save(str(best_path))
                 marker = "  <- new best, saved"
             print(f"[gate] steps={self.num_timesteps:,} food={mean_food:.2f} "
-                  f"win={mean_win:.0%} ({line}){marker}", flush=True)
+                  f"win={mean_win:.0%} ret={mean_ret:.1f} ({line}){marker}",
+                  flush=True)
 
         def _on_step(self) -> bool:
             if self.num_timesteps >= self.next_eval:
@@ -570,6 +616,14 @@ def main() -> None:
     parser.add_argument("--timesteps", type=int, default=8_000_000)
     parser.add_argument("--n-envs", type=int, default=18)
     parser.add_argument("--eval-every", type=int, default=1_000_000)
+    parser.add_argument("--style", choices=tuple(STYLE_REWARDS), default="balanced",
+                        help="reward profile / playstyle character to train")
+    parser.add_argument("--gate-metric", choices=("combined", "return"),
+                        default="combined",
+                        help="what the gate ranks checkpoints by: 'combined' "
+                             "(mean food + 10x win rate) or 'return' (mean "
+                             "episode return under --style's own reward, which "
+                             "is what a character is optimizing)")
     parser.add_argument("--gate-episodes", type=int, default=20,
                         help="episodes per board size in the gate eval; too few "
                              "and the gate selects noise instead of skill")
@@ -589,10 +643,18 @@ def main() -> None:
     window = check_window(args.window)
     suffix = "" if window == 11 else f"_w{window}"
     opp_channels = args.opp_channels
+    short = {"balanced": "bal", "aggressive": "aggr", "defensive": "def"}
+    styled = args.style != "balanced" or args.gate_metric == "return"
     if args.init is None:
-        args.init = REPO / "examples" / f"ppo_snake_transformer{suffix}.zip"
+        # A character starts from the finished battle model; the plain recipe
+        # starts from the single-snake one.
+        args.init = REPO / "examples" / (
+            f"ppo_snake_transformer_battle{suffix}.zip" if styled
+            else f"ppo_snake_transformer{suffix}.zip")
     if args.out is None:
-        args.out = REPO / "examples" / f"ppo_snake_transformer_battle{suffix}.zip"
+        args.out = REPO / "examples" / (
+            f"ppo_snake_transformer_battle{suffix}_{short[args.style]}.zip"
+            if styled else f"ppo_snake_transformer_battle{suffix}.zip")
     if args.work_dir is None:
         args.work_dir = Path(f"/tmp/snake_trf_battle{suffix}")
     args.work_dir.mkdir(parents=True, exist_ok=True)
@@ -620,12 +682,13 @@ def main() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     amp = args.amp and device == "cuda"
     print(f"[setup] device={device} window={window} patch={args.patch_size} "
-          f"amp={amp} channels={8 if opp_channels else 5} gamma={GAMMA}", flush=True)
+          f"amp={amp} channels={8 if opp_channels else 5} gamma={GAMMA} "
+          f"style={args.style} reward={STYLE_REWARDS[args.style]}", flush=True)
 
     opponents = [o.strip() for o in args.opponents.split(",") if o.strip()]
     sizes = [MIX_SIZES[i % len(MIX_SIZES)] for i in range(args.n_envs)]
     env_fns = [make_env_fn(sizes[i], opponents[i % len(opponents)], window,
-                          opp_channels)
+                          opp_channels, args.style)
                for i in range(args.n_envs)]
     vec_env = VecMonitor(SubprocVecEnv(env_fns))
     print(f"[setup] {args.n_envs} envs, sizes={sizes}, opponents={opponents}", flush=True)
@@ -640,8 +703,8 @@ def main() -> None:
                        args.bc_lr, model.device, args.bc_cache)
         bc_path = args.work_dir / "battle_bc.zip"
         model.save(str(bc_path))
-        food, win = evaluate(model, EVAL_SIZES, 10, window,
-                             opp_channels=opp_channels)
+        food, win, _ = evaluate(model, EVAL_SIZES, 10, window,
+                                opp_channels=opp_channels, style=args.style)
         print("[bc] eval food:", {g: round(v, 2) for g, v in food.items()},
               "win:", {g: round(v, 2) for g, v in win.items()}, flush=True)
 
@@ -654,7 +717,8 @@ def main() -> None:
     # -- PPO fine-tune ------------------------------------------------------
     best_path = args.work_dir / "battle_ppo_best.zip"
     ppo_finetune(model, args.timesteps, best_path, args.eval_every, window,
-                 opp_channels=opp_channels, gate_episodes=args.gate_episodes)
+                 opp_channels=opp_channels, gate_episodes=args.gate_episodes,
+                 style=args.style, gate_metric=args.gate_metric)
     vec_env.close()
 
     # -- final: pick best gate checkpoint, evaluate thoroughly --------------
@@ -662,10 +726,11 @@ def main() -> None:
 
     final = PPO.load(str(best_path if best_path.exists() else args.out
                          if args.out.exists() else best_path), device=device)
-    food, win = evaluate(final, EVAL_SIZES, 20, window,
-                         opp_channels=opp_channels)
+    food, win, rets = evaluate(final, EVAL_SIZES, 20, window,
+                               opp_channels=opp_channels, style=args.style)
     print("[final] food (20 eps/size):", {g: round(v, 2) for g, v in food.items()}, flush=True)
     print("[final] win-rate vs search:", {g: round(v, 2) for g, v in win.items()}, flush=True)
+    print("[final] episode return:", {g: round(v, 1) for g, v in rets.items()}, flush=True)
     final.save(str(args.out))
     print(f"[final] saved to {args.out}", flush=True)
 

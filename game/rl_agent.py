@@ -153,28 +153,41 @@ _MODELS = {
         "label": "学習済みAI (Transformer バランス型)",
         "needs_gym_snake": True,
     },
-    # The same three playstyles grown on the *battle-trained* base instead of
-    # the single-snake one: the personality comes from the same styled experts,
-    # but the base underneath already knows how to fight, so these keep the
-    # battle model's strength and add a character on top.
+    # The same three playstyles on the battle-trained base -- but built by
+    # *reward* (examples/train_transformer_battle.py --style) rather than by
+    # cloning a styled expert. Imitation caps a character at its teacher, and
+    # this base already outclasses the search AI those teachers are built from,
+    # so cloning made the "aggressive" model less aggressive than the neutral
+    # one. A reward profile has no such ceiling. All three read the same
+    # 8-channel observation as the base they came from.
     "rl_trf_battle_aggr": {
+        # Kill bounty worth ~30 apples: crowds the rival and plays for the
+        # crash. Closest to the opponent of the three -- and the most likely to
+        # die for it.
         "file": _EXAMPLES / "ppo_snake_transformer_battle_aggr.zip",
         "obs": "ego",
         "grid": None,
+        "opponent_channels": True,
         "label": "学習済みAI (対戦Transformer 攻撃型)",
         "needs_gym_snake": True,
     },
     "rl_trf_battle_def": {
+        # Paid per tick it stays alive, with no bounty on the rival and no
+        # interest in the final score: keeps its distance and outlives trouble.
         "file": _EXAMPLES / "ppo_snake_transformer_battle_def.zip",
         "obs": "ego",
         "grid": None,
+        "opponent_channels": True,
         "label": "学習済みAI (対戦Transformer 防御型)",
         "needs_gym_snake": True,
     },
     "rl_trf_battle_bal": {
+        # The battle reward itself, trained on for the same 2M steps as the
+        # other two so the trio is comparable: the neutral middle.
         "file": _EXAMPLES / "ppo_snake_transformer_battle_bal.zip",
         "obs": "ego",
         "grid": None,
+        "opponent_channels": True,
         "label": "学習済みAI (対戦Transformer バランス型)",
         "needs_gym_snake": True,
     },
@@ -241,8 +254,10 @@ def _load_model(name: str):
                 # saved CNN model references at load time.
                 import gym_snake.policies  # noqa: F401
 
-            # Force CPU: no GPU needed.
-            _models[name] = PPO.load(str(cfg["file"]), device="cpu")
+            # "auto" = CUDA when the box has it, CPU otherwise. (Torch has no
+            # "gpu" device string -- passing one raises, and every strategy
+            # would silently fall back to the search AI.)
+            _models[name] = PPO.load(str(cfg["file"]), device="auto")
     return _models[name]
 
 
