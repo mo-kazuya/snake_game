@@ -49,7 +49,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from gym_snake.obs import CHANNELS, check_window, ego_observation  # noqa: E402
+from gym_snake.obs import check_window, ego_channels, ego_observation  # noqa: E402
 
 # Absolute headings as (dx, dy), clockwise -- identical to SnakeEnv._HEADINGS.
 #   index: 0=up  1=right  2=down  3=left
@@ -130,16 +130,21 @@ def make_opponent(spec: str):
 
                 model = PPO.load(path, device="cpu")
                 cache["m"] = model
+                # The frozen opponent gets *its own* observation, not the
+                # learner's: generations with different windows or without the
+                # opponent channels have to stay playable as sparring partners.
+                ch, win, _ = model.observation_space.shape
+                cache["window"] = win
+                cache["opp_channels"] = ch == ego_channels(True)
             me = state.snakes[idx]
-            opp = [
-                cell
-                for j, s in enumerate(state.snakes)
-                if j != idx and s.alive
-                for cell in s.body
-            ]
+            rivals = [s for j, s in enumerate(state.snakes) if j != idx and s.alive]
+            opp = [cell for s in rivals for cell in s.body]
             obs = ego_observation(
                 me.body, state.food, state.grid,
-                _heading_index(me.direction), opponent_cells=opp,
+                _heading_index(me.direction), window=cache["window"],
+                opponent_cells=opp,
+                opponent_head=rivals[0].body[0] if rivals else None,
+                opponent_channels=cache["opp_channels"],
             )
             # Frozen opponent plays stochastically for exploration diversity.
             action, _ = model.predict(obs, deterministic=False)
@@ -205,6 +210,7 @@ class SnakeBattleEnv(gym.Env):
         reward_opp_death: float = 0.0,
         reward_win: float = 0.0,
         reward_lose: float = 0.0,
+        opponent_channels: bool = False,
         render_mode: str | None = None,
     ) -> None:
         super().__init__()
@@ -224,12 +230,15 @@ class SnakeBattleEnv(gym.Env):
         self.reward_opp_death = reward_opp_death
         self.reward_win = reward_win
         self.reward_lose = reward_lose
+        self.opponent_channels = opponent_channels
         self.render_mode = render_mode
 
         self.action_space = spaces.Discrete(3)
+        self._channels = ego_channels(opponent_channels)
         self.observation_space = spaces.Box(
             low=0.0, high=1.0,
-            shape=(CHANNELS, self.ego_window, self.ego_window), dtype=np.float32,
+            shape=(self._channels, self.ego_window, self.ego_window),
+            dtype=np.float32,
         )
 
         self._state = None            # game.engine.GameState
@@ -353,15 +362,17 @@ class SnakeBattleEnv(gym.Env):
         me = state.snakes[0]
         if not me.body:  # dead: body is cleared by the engine
             return np.zeros(
-                (CHANNELS, self.ego_window, self.ego_window), dtype=np.float32
+                (self._channels, self.ego_window, self.ego_window),
+                dtype=np.float32,
             )
-        opp_cells = [
-            cell for cell in state.snakes[1].body if state.snakes[1].alive
-        ]
+        opp = state.snakes[1]
+        opp_cells = [cell for cell in opp.body if opp.alive]
         return ego_observation(
             me.body, state.food, state.grid,
             _heading_index(me.direction), window=self.ego_window,
             opponent_cells=opp_cells,
+            opponent_head=opp.body[0] if (opp.alive and opp.body) else None,
+            opponent_channels=self.opponent_channels,
         )
 
     def _rel_to_dir(self, direction: str, action: int) -> str:

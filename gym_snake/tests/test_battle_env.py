@@ -147,3 +147,27 @@ def test_agent_survives_when_opponent_dies():
     _, _, terminated, truncated, info = env.step(0)
     assert info["opp_alive"] is False
     assert not (terminated or truncated)  # agent is still alive and playing
+
+
+def test_opponent_channels_change_the_observation_space():
+    plain = SnakeBattleEnv(grid_size=12)
+    aware = SnakeBattleEnv(grid_size=12, opponent_channels=True)
+    assert plain.observation_space.shape == (5, 11, 11)
+    assert aware.observation_space.shape == (8, 11, 11)
+    check_env(aware, skip_render_check=True)
+
+
+def test_opponent_channels_locate_the_rival_head():
+    """The rival's head gets its own channel instead of being merged into ours."""
+    env = SnakeBattleEnv(grid_size=12, opponent_channels=True)
+    obs, _ = env.reset(seed=3)
+    state = env._state
+    assert obs.shape == (8, 11, 11)
+    # Both snakes are alive at reset, so the rival is somewhere on the radar.
+    assert state.snakes[1].alive
+    assert obs[7].max() == 1.0            # minimap always carries it
+    assert obs[6].sum() in (0.0, 1.0)     # local head: at most one pixel
+    # And the dead-opponent case leaves them empty rather than lying.
+    state.snakes[1].alive = False
+    state.snakes[1].body = []
+    assert env._agent_obs()[5:].sum() == 0.0

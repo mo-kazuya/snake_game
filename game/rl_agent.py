@@ -37,11 +37,12 @@ the policy at least perceives it as "something to avoid", even though it was
 never trained with a second snake on the board.
 
 The one exception is ``"rl_trf_battle"``: the same ego/Transformer architecture,
-but **fine-tuned in the two-snake battle env** (``examples/train_transformer_battle.py``),
-so it was actually trained with a live opponent folded into the very same
-``opponent_cells`` channel. It loads and runs through exactly the same code path
-as ``"rl_trf"`` (identical observation and action space) -- only the weights
-differ.
+but **fine-tuned in the two-snake battle env** (``examples/train_transformer_battle.py``)
+*and* fed a wider observation. Its registry entry sets ``opponent_channels``, so
+:func:`build_observation` appends the three opponent-aware channels (rival body,
+rival head, rival head on the minimap) and hands it ``(8, 11, 11)``. Everything
+else -- action space, board-size independence, the loading path -- is unchanged,
+and in solo play the extra channels are simply zero.
 """
 
 from __future__ import annotations
@@ -64,6 +65,8 @@ _EXAMPLES = Path(settings.BASE_DIR) / "examples"
 # ``None`` means the observation is size-independent (runs on any board).
 # ``window`` (ego models only, optional) is the ego observation window the model
 # was trained with; absent/``None`` means the 11x11 default.
+# ``opponent_channels`` (ego models only, optional) marks a model trained with
+# the three extra opponent-aware channels (8 channels instead of 5).
 _MODELS = {
     "rl": {
         "file": _EXAMPLES / "ppo_snake_features.zip",
@@ -109,11 +112,15 @@ _MODELS = {
         # two-snake battle env (see examples/train_transformer_battle.py), so it
         # actually learned to contest the shared food, dodge the moving
         # opponent and avoid head-on crashes rather than treating the rival as a
-        # static wall. Drop-in: identical ego observation and action space, so
-        # it runs on any board size and in solo mode too (opponent_cells empty).
+        # static wall. Unlike every other model here it reads the **8-channel**
+        # observation: the rival gets its own body/head channels instead of
+        # being merged into ours, which is what head-on avoidance and cut-offs
+        # turn on. Still board-size independent, and solo play just leaves the
+        # opponent channels empty.
         "file": _EXAMPLES / "ppo_snake_transformer_battle.zip",
         "obs": "ego",
         "grid": None,
+        "opponent_channels": True,
         "label": "学習済みAI (ego/Transformer 対戦特化)",
         "needs_gym_snake": True,
     },
@@ -271,13 +278,15 @@ def _opponent_cells(state: GameState, snake_index: int) -> list[tuple[int, int]]
 
 
 def build_observation(state: GameState, obs_type: str, snake_index: int,
-                      window: int | None = None):
+                      window: int | None = None,
+                      opponent_channels: bool = False):
     """Convert a Django game state into the requested gym_snake observation
     for ``state.snakes[snake_index]``.
 
-    ``window`` only applies to ``obs_type="ego"`` and must be the window the
-    model was trained with (``None`` = the 11x11 default); feeding a model the
-    wrong window is a shape mismatch at best and silent nonsense at worst.
+    ``window`` and ``opponent_channels`` only apply to ``obs_type="ego"`` and
+    must match what the model was trained with (``None``/``False`` = the 11x11,
+    5-channel default); feeding a model the wrong observation is a shape
+    mismatch at best and silent nonsense at worst.
     """
     if obs_type == "grid":
         return _grid_observation(state, snake_index)
@@ -286,10 +295,15 @@ def build_observation(state: GameState, obs_type: str, snake_index: int,
         from gym_snake.obs import check_window, ego_observation
 
         me = state.snakes[snake_index]
+        rivals = [s for j, s in enumerate(state.snakes)
+                  if j != snake_index and s.alive and s.body]
         return ego_observation(
             me.body, state.food, state.grid, _heading_index(me.direction),
             window=check_window(window),
             opponent_cells=_opponent_cells(state, snake_index),
+            # Solo play just leaves the opponent channels empty.
+            opponent_head=rivals[0].body[0] if rivals else None,
+            opponent_channels=opponent_channels,
         )
     return _feature_observation(state, snake_index)
 
@@ -368,7 +382,8 @@ def choose_direction(state: GameState, snake_index: int, name: str = "rl") -> st
     ``state.snakes[snake_index]``."""
     model = _load_model(name)
     cfg = _MODELS[name]
-    obs = build_observation(state, cfg["obs"], snake_index, cfg.get("window"))
+    obs = build_observation(state, cfg["obs"], snake_index, cfg.get("window"),
+                            cfg.get("opponent_channels", False))
     action, _ = model.predict(obs, deterministic=True)
 
     me = state.snakes[snake_index]

@@ -32,6 +32,25 @@ Channels:
  4    minimap: head (peak-normalized)
 ====  =========================================================
 
+With ``opponent_channels=True`` three more channels are appended, and the
+observation becomes ``(8, WINDOW, WINDOW)``:
+
+====  =========================================================
+ 5    local: opponent body
+ 6    local: opponent head
+ 7    minimap: opponent head (peak-normalized)
+====  =========================================================
+
+Channels 0-4 keep folding the opponent into the danger/body maps exactly as
+before, so a rival is never *less* visible than it used to be. What the extra
+channels add is the ability to tell **whose** body a cell belongs to and, above
+all, **where the rival's head is** -- with 5 and 6 together the policy can read
+the opponent's heading (head cell plus the adjacent body cell), which is what
+head-on avoidance, cut-offs and food races actually turn on. Channel 7 keeps
+the rival on the radar once it leaves the local window, which on large boards
+is most of the time.
+
+
 The module is pure numpy so the Django server can build the exact same
 observation without importing gymnasium/torch. Both ``SnakeEnv`` and the Django
 adapter call :func:`ego_observation` — a single source of truth.
@@ -45,6 +64,12 @@ import numpy as np
 
 WINDOW = 11  # side of both the local view and the minimap (odd: head-centered)
 CHANNELS = 5
+CHANNELS_OPP = 8  # with the three opponent-aware channels appended
+
+
+def ego_channels(opponent_channels: bool = False) -> int:
+    """Number of channels :func:`ego_observation` returns for this setting."""
+    return CHANNELS_OPP if opponent_channels else CHANNELS
 
 
 def check_window(window: int | None) -> int:
@@ -93,6 +118,8 @@ def ego_observation(
     heading_idx: int,
     window: int = WINDOW,
     opponent_cells: list[tuple[int, int]] | None = None,
+    opponent_head: tuple[int, int] | None = None,
+    opponent_channels: bool = False,
 ) -> np.ndarray:
     """Build the ``(5, window, window)`` egocentric observation.
 
@@ -105,6 +132,13 @@ def ego_observation(
     way as this snake's own body. ``None`` (the default) reproduces the
     original single-snake observation exactly, so training (``SnakeEnv``)
     and any existing single-snake caller are unaffected.
+
+    ``opponent_channels=True`` appends the three opponent-aware channels
+    documented in the module docstring, making the result ``(8, window,
+    window)``; ``opponent_head`` is that rival's head cell (``None`` = no live
+    rival, leaving channels 6 and 7 empty). Channels 0-4 are bit-identical
+    either way, so this is purely additive: a model trained without the extra
+    channels is unaffected, and one trained with them sees the same first five.
     """
     c = window // 2
 
@@ -137,13 +171,29 @@ def ego_observation(
     # clockwise) k = heading_idx puts the cell in front of the head at
     # (c-1, c), the right-hand cell at (c, c+1), the left-hand at (c, c-1).
     k = heading_idx
-    obs = np.stack(
-        [
-            np.rot90(local_deadly, k),
-            np.rot90(local_food, k),
-            np.rot90(_resize(body_full, window), k),
-            np.rot90(_peak_normalize(_resize(food_map, window)), k),
-            np.rot90(_peak_normalize(_resize(head_map, window)), k),
+    planes = [
+        np.rot90(local_deadly, k),
+        np.rot90(local_food, k),
+        np.rot90(_resize(body_full, window), k),
+        np.rot90(_peak_normalize(_resize(food_map, window)), k),
+        np.rot90(_peak_normalize(_resize(head_map, window)), k),
+    ]
+
+    if opponent_channels:
+        opp_body = np.zeros_like(deadly)
+        for (x, y) in (opponent_cells or ()):
+            opp_body[y, x] = 1.0
+        opp_head = np.zeros_like(deadly)
+        if opponent_head is not None:
+            opp_head[opponent_head[1], opponent_head[0]] = 1.0
+        # Same padding rule as the local view above: outside the board is a
+        # wall, and there is no opponent there.
+        opp_body_pad = np.pad(opp_body, c, constant_values=0.0)
+        opp_head_pad = np.pad(opp_head, c, constant_values=0.0)
+        planes += [
+            np.rot90(opp_body_pad[ly - c: ly + c + 1, lx - c: lx + c + 1], k),
+            np.rot90(opp_head_pad[ly - c: ly + c + 1, lx - c: lx + c + 1], k),
+            np.rot90(_peak_normalize(_resize(opp_head, window)), k),
         ]
-    )
-    return np.ascontiguousarray(obs, dtype=np.float32)
+
+    return np.ascontiguousarray(np.stack(planes), dtype=np.float32)

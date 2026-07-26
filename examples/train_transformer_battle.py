@@ -69,7 +69,21 @@ sys.path.insert(0, str(REPO))  # for `game.*` (gym_snake is pip-installed)
 MIX_SIZES = [8, 10, 12, 14, 16, 20, 24, 30, 40]
 EVAL_SIZES = [8, 10, 14, 20, 30, 40]
 
-GAMMA = 0.99
+# The terminal win/lose bonus is what makes this a *battle* objective, so the
+# discount has to reach it. At 0.99 a win 300 ticks away is worth 0.05 -- less
+# than a twentieth of a single food -- and 40x40 games run 300-600 ticks, so the
+# old runs optimized eating and only incidentally winning (food went up 6.6x,
+# win rate only 32%->47%). 0.997 gives a ~330-tick horizon, which actually
+# covers a game.
+GAMMA = 0.997
+
+# The value target scales like 1/(1-gamma), so 0.99 -> 0.997 makes returns ~3.3x
+# bigger and the *squared* error ~11x bigger. The policy and value heads share
+# the Transformer trunk, so leaving the usual 0.5 here would let value fitting
+# drive the shared representation (measured: BC val accuracy fell 90.6% -> 87.7%
+# on the same demos purely from raising gamma). Scaling the coefficient down by
+# the same ~11x restores the balance the 0.99 runs had.
+VF_COEF = 0.05
 
 # Same architecture as the shipped v2 Transformer, so --init weights load
 # straight in (and --no-init reproduces that architecture from scratch).
@@ -87,7 +101,7 @@ _HEADINGS = [(0, -1), (1, 0), (0, 1), (-1, 0)]
 # Phase 1: expert *battle* demonstrations (search AI vs search AI, parallel)
 # ---------------------------------------------------------------------------
 
-def _collect_chunk(args: tuple[int, int, int, float, int]):
+def _collect_chunk(args: tuple[int, int, int, float, int, bool]):
     """Play the search AI as snake 0 against a search-AI opponent on `grid`
     boards until `quota` transitions for snake 0 exist.
 
@@ -98,7 +112,7 @@ def _collect_chunk(args: tuple[int, int, int, float, int]):
     move is executed instead of the expert's (DAgger-style off-distribution
     coverage) but the label stays the expert's.
     """
-    seed, grid, quota, eps, window = args
+    seed, grid, quota, eps, window, opp_channels = args
     random.seed(seed)
 
     from game.ai import _opposite, _simulate, choose_direction
@@ -110,13 +124,11 @@ def _collect_chunk(args: tuple[int, int, int, float, int]):
     act_buf: list[int] = []
     ret_buf: list[float] = []
 
+    def rivals(state, idx):
+        return [s for j, s in enumerate(state.snakes) if j != idx and s.alive]
+
     def opp_cells(state, idx):
-        return [
-            cell
-            for j, s in enumerate(state.snakes)
-            if j != idx and s.alive
-            for cell in s.body
-        ]
+        return [cell for s in rivals(state, idx) for cell in s.body]
 
     while len(act_buf) < quota:
         state = GameState(grid=grid)
@@ -127,9 +139,12 @@ def _collect_chunk(args: tuple[int, int, int, float, int]):
         while not state.game_over and state.snakes[0].alive and steps_since_food < grid * grid:
             agent = state.snakes[0]
             hidx = _heading_index(agent.direction)
+            opp = rivals(state, 0)
             obs = ego_observation(agent.body, state.food, grid, hidx,
                                   window=window,
-                                  opponent_cells=opp_cells(state, 0))
+                                  opponent_cells=[c for s_ in opp for c in s_.body],
+                                  opponent_head=opp[0].body[0] if opp else None,
+                                  opponent_channels=opp_channels)
 
             head, food = agent.body[0], state.food
             prev_dist = abs(head[0] - food[0]) + abs(head[1] - food[1])
@@ -185,7 +200,7 @@ def _collect_chunk(args: tuple[int, int, int, float, int]):
 
 
 def collect_dataset(total: int, workers: int, out_path: Path, window: int,
-                    eps: float = 0.1) -> Path:
+                    opp_channels: bool = False, eps: float = 0.1) -> Path:
     per_size = total // len(MIX_SIZES)
     chunk = 20_000
     tasks = []
@@ -194,13 +209,14 @@ def collect_dataset(total: int, workers: int, out_path: Path, window: int,
         remaining = per_size
         while remaining > 0:
             q = min(chunk, remaining)
-            tasks.append((seed, grid, q, eps, window))
+            tasks.append((seed, grid, q, eps, window, opp_channels))
             seed += 1
             remaining -= q
     random.shuffle(tasks)
 
     print(f"[collect] {len(tasks)} chunks on {workers} workers "
-          f"({per_size:,} transitions x {len(MIX_SIZES)} sizes, window={window})",
+          f"({per_size:,} transitions x {len(MIX_SIZES)} sizes, window={window}, "
+          f"channels={8 if opp_channels else 5})",
           flush=True)
     t0 = time.time()
     obs_parts, act_parts, ret_parts = [], [], []
@@ -226,7 +242,8 @@ def collect_dataset(total: int, workers: int, out_path: Path, window: int,
 # Environments
 # ---------------------------------------------------------------------------
 
-def make_env_fn(grid: int, opponent: str, window: int):
+def make_env_fn(grid: int, opponent: str, window: int,
+                opp_channels: bool = False):
     def _thunk():
         import gymnasium as gym
 
@@ -236,13 +253,14 @@ def make_env_fn(grid: int, opponent: str, window: int):
             "gym_snake/SnakeBattle-v0", grid_size=grid, opponent=opponent,
             ego_window=window, reward_opp_death=REWARD_OPP_DEATH,
             reward_win=REWARD_WIN, reward_lose=REWARD_LOSE,
+            opponent_channels=opp_channels,
         )
 
     return _thunk
 
 
 def evaluate(model, sizes, episodes: int, window: int,
-             opponent: str = "search",
+             opponent: str = "search", opp_channels: bool = False,
              seed0: int = 1000) -> tuple[dict[int, float], dict[int, float]]:
     """Greedy eval vs a fixed opponent. Returns (mean food, win-rate) per size."""
     from stable_baselines3.common.vec_env import DummyVecEnv
@@ -250,7 +268,7 @@ def evaluate(model, sizes, episodes: int, window: int,
     food: dict[int, float] = {}
     winrate: dict[int, float] = {}
     for grid in sizes:
-        vec = DummyVecEnv([make_env_fn(grid, opponent, window)
+        vec = DummyVecEnv([make_env_fn(grid, opponent, window, opp_channels)
                            for _ in range(episodes)])
         vec.seed(seed0)
         obs = vec.reset()
@@ -349,7 +367,7 @@ def behavior_clone(model, data_path: Path, epochs: int, batch_size: int,
             values, log_prob, entropy = policy.evaluate_actions(obs_b, act_b)
             ce = -log_prob.mean()
             vf = F.mse_loss(values.flatten(), ret_b)
-            loss = ce + 0.5 * vf - 0.003 * entropy.mean()
+            loss = ce + VF_COEF * vf - 0.003 * entropy.mean()
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -385,13 +403,20 @@ def behavior_clone(model, data_path: Path, epochs: int, batch_size: int,
 # ---------------------------------------------------------------------------
 
 def ppo_finetune(model, timesteps: int, best_path: Path, eval_every: int,
-                 window: int) -> None:
+                 window: int, opp_channels: bool = False,
+                 gate_episodes: int = 20) -> None:
     from stable_baselines3.common.callbacks import BaseCallback
 
     class BestGate(BaseCallback):
         """Every `eval_every` steps evaluate vs the search AI on small/mid/large
         boards and keep the checkpoint with the best combined score (mean food
-        plus a win-rate bonus), so the gate rewards *winning*, not just eating."""
+        plus a win-rate bonus), so the gate rewards *winning*, not just eating.
+
+        The episode count matters more than it looks: at 5 episodes per size an
+        earlier run scored 25.9 food / 60% win and 40.5 food / 47% win **18k
+        steps apart**, i.e. the gate was mostly selecting noise. 20 episodes on
+        fixed seeds costs a couple of minutes per gate and actually ranks
+        checkpoints."""
 
         gate_sizes = (10, 20, 40)
 
@@ -401,7 +426,8 @@ def ppo_finetune(model, timesteps: int, best_path: Path, eval_every: int,
             self.next_eval = eval_every
 
         def _eval_and_save(self):
-            food, winrate = evaluate(self.model, self.gate_sizes, 5, window)
+            food, winrate = evaluate(self.model, self.gate_sizes, gate_episodes,
+                                     window, opp_channels=opp_channels)
             mean_food = float(np.mean(list(food.values())))
             mean_win = float(np.mean(list(winrate.values())))
             combined = mean_food + 10.0 * mean_win  # win-rate weighted in
@@ -452,6 +478,7 @@ def build_model(vec_env, init_path: Path | None, device,
         "CnnPolicy", vec_env, verbose=1, device=device,
         n_steps=1024, batch_size=1024, n_epochs=4,
         gamma=GAMMA, gae_lambda=0.95, ent_coef=0.005, clip_range=0.15,
+        vf_coef=VF_COEF,
         learning_rate=lambda pr: 1e-4 * pr,
         policy_kwargs=transformer_policy_kwargs(
             patch_size=patch_size, amp=amp, **MODEL_KWARGS),
@@ -460,15 +487,44 @@ def build_model(vec_env, init_path: Path | None, device,
     if init_path is not None and init_path.exists():
         print(f"[setup] warm-starting policy weights from {init_path}", flush=True)
         source = PPO.load(str(init_path), device=device)
-        if source.observation_space.shape != vec_env.observation_space.shape:
+        src_shape = tuple(source.observation_space.shape)
+        dst_shape = tuple(vec_env.observation_space.shape)
+        if src_shape[1:] != dst_shape[1:] or src_shape[0] > dst_shape[0]:
             raise SystemExit(
-                f"--init model was trained with observation "
-                f"{source.observation_space.shape} but this run uses "
-                f"{vec_env.observation_space.shape}: pass the matching "
-                f"--window (the ego window is part of the weights)."
+                f"--init model was trained with observation {src_shape} but "
+                f"this run uses {dst_shape}: pass the matching --window (the "
+                f"ego window is part of the weights)."
             )
+        state_dict = source.policy.state_dict()
+        if src_shape[0] < dst_shape[0]:
+            # Extra observation channels: keep the base's patch embedding for
+            # the channels it knows and zero-init the new ones, so the policy
+            # starts out *numerically identical* to --init and then learns what
+            # the added channels are worth. (Only the patch embedding reads the
+            # observation directly, so nothing else needs resizing.)
+            import torch
+
+            target = model.policy.state_dict()
+            grown = []
+            for key, src_w in list(state_dict.items()):
+                dst_w = target.get(key)
+                if dst_w is None or dst_w.shape == src_w.shape:
+                    continue
+                if not key.endswith("embed.weight"):
+                    raise SystemExit(
+                        f"cannot grow {key} from {tuple(src_w.shape)} to "
+                        f"{tuple(dst_w.shape)}: only the patch embedding is "
+                        f"expected to depend on the channel count."
+                    )
+                w = torch.zeros_like(dst_w)
+                w[:, :src_w.shape[1]] = src_w
+                state_dict[key] = w
+                grown.append(key)
+            print(f"[setup] grew {src_shape[0]} -> {dst_shape[0]} observation "
+                  f"channels; zero-init on the new ones in {len(grown)} "
+                  f"embedding(s)", flush=True)
         missing, unexpected = model.policy.load_state_dict(
-            source.policy.state_dict(), strict=False)
+            state_dict, strict=False)
         if missing or unexpected:
             print(f"[setup] WARNING: state_dict mismatch "
                   f"(missing={list(missing)}, unexpected={list(unexpected)})",
@@ -514,6 +570,15 @@ def main() -> None:
     parser.add_argument("--timesteps", type=int, default=8_000_000)
     parser.add_argument("--n-envs", type=int, default=18)
     parser.add_argument("--eval-every", type=int, default=1_000_000)
+    parser.add_argument("--gate-episodes", type=int, default=20,
+                        help="episodes per board size in the gate eval; too few "
+                             "and the gate selects noise instead of skill")
+    parser.add_argument("--opponent-channels", dest="opp_channels",
+                        action="store_true", default=True,
+                        help="give the policy the 3 opponent-aware observation "
+                             "channels (rival body / rival head, local + minimap)")
+    parser.add_argument("--no-opponent-channels", dest="opp_channels",
+                        action="store_false")
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--work-dir", type=Path, default=None)
     parser.add_argument("--skip-ppo", action="store_true")
@@ -523,6 +588,7 @@ def main() -> None:
 
     window = check_window(args.window)
     suffix = "" if window == 11 else f"_w{window}"
+    opp_channels = args.opp_channels
     if args.init is None:
         args.init = REPO / "examples" / f"ppo_snake_transformer{suffix}.zip"
     if args.out is None:
@@ -536,10 +602,13 @@ def main() -> None:
     # -- optional battle-demo dataset ---------------------------------------
     data_path = args.dataset
     if args.bc_transitions > 0 and data_path is None:
-        data_path = args.work_dir / "battle_demos.npz"
+        # The demos carry the observation, so channel settings can't share a
+        # cache file.
+        data_path = args.work_dir / (
+            "battle_demos_opp.npz" if opp_channels else "battle_demos.npz")
         if not data_path.exists():
             collect_dataset(args.bc_transitions, args.workers, data_path,
-                            window, eps=args.demo_eps)
+                            window, opp_channels, eps=args.demo_eps)
         else:
             print(f"[collect] reusing cached {data_path}", flush=True)
 
@@ -551,11 +620,12 @@ def main() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     amp = args.amp and device == "cuda"
     print(f"[setup] device={device} window={window} patch={args.patch_size} "
-          f"amp={amp}", flush=True)
+          f"amp={amp} channels={8 if opp_channels else 5} gamma={GAMMA}", flush=True)
 
     opponents = [o.strip() for o in args.opponents.split(",") if o.strip()]
     sizes = [MIX_SIZES[i % len(MIX_SIZES)] for i in range(args.n_envs)]
-    env_fns = [make_env_fn(sizes[i], opponents[i % len(opponents)], window)
+    env_fns = [make_env_fn(sizes[i], opponents[i % len(opponents)], window,
+                          opp_channels)
                for i in range(args.n_envs)]
     vec_env = VecMonitor(SubprocVecEnv(env_fns))
     print(f"[setup] {args.n_envs} envs, sizes={sizes}, opponents={opponents}", flush=True)
@@ -570,7 +640,8 @@ def main() -> None:
                        args.bc_lr, model.device, args.bc_cache)
         bc_path = args.work_dir / "battle_bc.zip"
         model.save(str(bc_path))
-        food, win = evaluate(model, EVAL_SIZES, 10, window)
+        food, win = evaluate(model, EVAL_SIZES, 10, window,
+                             opp_channels=opp_channels)
         print("[bc] eval food:", {g: round(v, 2) for g, v in food.items()},
               "win:", {g: round(v, 2) for g, v in win.items()}, flush=True)
 
@@ -582,7 +653,8 @@ def main() -> None:
 
     # -- PPO fine-tune ------------------------------------------------------
     best_path = args.work_dir / "battle_ppo_best.zip"
-    ppo_finetune(model, args.timesteps, best_path, args.eval_every, window)
+    ppo_finetune(model, args.timesteps, best_path, args.eval_every, window,
+                 opp_channels=opp_channels, gate_episodes=args.gate_episodes)
     vec_env.close()
 
     # -- final: pick best gate checkpoint, evaluate thoroughly --------------
@@ -590,7 +662,8 @@ def main() -> None:
 
     final = PPO.load(str(best_path if best_path.exists() else args.out
                          if args.out.exists() else best_path), device=device)
-    food, win = evaluate(final, EVAL_SIZES, 20, window)
+    food, win = evaluate(final, EVAL_SIZES, 20, window,
+                         opp_channels=opp_channels)
     print("[final] food (20 eps/size):", {g: round(v, 2) for g, v in food.items()}, flush=True)
     print("[final] win-rate vs search:", {g: round(v, 2) for g, v in win.items()}, flush=True)
     final.save(str(args.out))

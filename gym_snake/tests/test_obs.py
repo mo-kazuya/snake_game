@@ -7,7 +7,8 @@ import pytest
 from gymnasium.utils.env_checker import check_env
 
 from gym_snake.envs import SnakeEnv
-from gym_snake.obs import CHANNELS, WINDOW, check_window, ego_observation
+from gym_snake.obs import (CHANNELS, CHANNELS_OPP, WINDOW, check_window,
+                           ego_observation)
 
 C = WINDOW // 2  # head pixel (row, col) = (C, C)
 
@@ -153,3 +154,60 @@ def test_env_ego_window_is_threaded_through(window):
 def test_env_rejects_even_ego_window():
     with pytest.raises(ValueError):
         SnakeEnv(grid_size=10, obs_type="ego", ego_window=20)
+
+
+# -- opponent-aware channels ------------------------------------------------
+
+
+def test_opponent_channels_are_purely_additive():
+    """Channels 0-4 must be bit-identical with and without the extra ones."""
+    grid = 15
+    snake = [(7, 7), (7, 8), (7, 9)]
+    opp = [(5, 7), (5, 8)]
+    base = ego_observation(snake, (2, 2), grid, 0, opponent_cells=opp)
+    grown = ego_observation(snake, (2, 2), grid, 0, opponent_cells=opp,
+                            opponent_head=(5, 7), opponent_channels=True)
+    assert base.shape == (CHANNELS, WINDOW, WINDOW)
+    assert grown.shape == (CHANNELS_OPP, WINDOW, WINDOW)
+    assert np.array_equal(grown[:CHANNELS], base)
+
+
+def test_opponent_body_and_head_are_separable_from_our_own():
+    """The rival's body is its own channel, and its head is pinpointed."""
+    grid = 15
+    head = (7, 7)
+    snake = [head, (7, 8), (7, 9)]          # heading up
+    opp_head = (7, 5)                        # 2 cells straight ahead
+    opp = [opp_head, (7, 4), (7, 3)]
+    obs = ego_observation(snake, None, grid, 0, opponent_cells=opp,
+                          opponent_head=opp_head, opponent_channels=True)
+    # Own body is *not* in the opponent channels...
+    assert obs[5][C + 1, C] == 0.0           # our neck, one pixel down
+    assert obs[6].sum() == 1.0               # exactly one opponent head
+    # ...and the rival's cells are, at the mirrored-forward pixels.
+    assert obs[5][C - 2, C] == 1.0           # rival head, 2 up
+    assert obs[6][C - 2, C] == 1.0
+    assert obs[5][C - 3, C] == 1.0           # rival neck, 3 up
+    # Head + body together give the rival's heading: its neck is behind it.
+    assert obs[6][C - 3, C] == 0.0
+
+
+def test_opponent_head_stays_visible_on_the_minimap_when_far_away():
+    """Out of the local window, the rival is only on the minimap channel."""
+    grid = 40
+    head = (5, 5)
+    opp_head = (35, 35)
+    obs = ego_observation([head, (5, 6)], None, grid, 0,
+                          opponent_cells=[opp_head, (35, 36)],
+                          opponent_head=opp_head, opponent_channels=True)
+    assert obs[5].sum() == 0.0               # nothing in the local view
+    assert obs[6].sum() == 0.0
+    assert obs[7].max() == 1.0               # but the minimap still has it
+
+
+def test_no_opponent_leaves_the_extra_channels_empty():
+    """Solo play through the same 8-channel model: rival channels are zero."""
+    obs = ego_observation([(7, 7), (7, 8)], (2, 2), 15, 0,
+                          opponent_channels=True)
+    assert obs.shape == (CHANNELS_OPP, WINDOW, WINDOW)
+    assert obs[5:].sum() == 0.0

@@ -340,6 +340,32 @@ class RLAgentTests(TestCase):
                      "rl_trf_battle_def", "rl_trf_battle_bal"):
             self.assertIsNone(rl_agent._MODELS[name].get("window"))
 
+    def test_opponent_channels_build_the_eight_channel_observation(self):
+        # A model registered with opponent_channels gets the rival's body and
+        # head in their own channels, and solo play just leaves them empty.
+        import numpy as np
+
+        s = GameState(grid=20, snakes=[
+            Snake(body=[(5, 5), (4, 5), (3, 5)], direction="right"),
+            Snake(body=[(8, 5), (8, 6), (8, 7)], direction="down"),
+        ])
+        s.food = (10, 10)
+        plain = rl_agent.build_observation(s, "ego", 0)
+        aware = rl_agent.build_observation(s, "ego", 0, opponent_channels=True)
+        self.assertEqual(plain.shape, (5, 11, 11))
+        self.assertEqual(aware.shape, (8, 11, 11))
+        # Purely additive: the first five channels are untouched.
+        self.assertTrue(np.array_equal(aware[:5], plain))
+        self.assertEqual(aware[6].sum(), 1.0)   # exactly one rival head
+        self.assertGreater(aware[5].sum(), 0.0)
+
+        solo = GameState(grid=20, snakes=[
+            Snake(body=[(5, 5), (4, 5)], direction="right")])
+        solo.food = (10, 10)
+        obs = rl_agent.build_observation(solo, "ego", 0, opponent_channels=True)
+        self.assertEqual(obs.shape, (8, 11, 11))
+        self.assertEqual(obs[5:].sum(), 0.0)
+
     def test_opponent_body_folded_into_feature_danger_sensors(self):
         s = GameState(grid=20, snakes=[
             Snake(body=[(5, 5), (4, 5), (3, 5)], direction="right"),
